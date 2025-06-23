@@ -1,0 +1,32 @@
+Metadata-Version: 2.4
+Name: celltreebench
+Version: 0.0.1
+Summary: A benchmark dataset for cell lineage tree reconstruction.
+Author-email: Da Kuang <kuangda@seas.upenn.edu>
+Project-URL: Homepage, https://kuang-da.github.io/CellTreeQM-page/
+Project-URL: Bug Tracker, https://github.com/kuang-da/CellTreeBench/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# CellTreeBench
+
+A benchmark dataset for cell lineage tree reconstruction.
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+## Usage
+
+```python
+from celltreebench.datasets import CElegansDataset
+
+dataset = CElegansDataset()
+``` 

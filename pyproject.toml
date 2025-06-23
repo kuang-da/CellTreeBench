@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "celltreebench"
+version = "0.0.1"
+authors = [
+  { name="Da Kuang", email="kuangda@seas.upenn.edu" },
+]
+description = "A benchmark dataset for cell lineage tree reconstruction."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://kuang-da.github.io/CellTreeQM-page/"
+"Bug Tracker" = "https://github.com/kuang-da/CellTreeBench/issues" 
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
