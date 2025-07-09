@@ -19,7 +19,8 @@ CellTreeBench provides standardized datasets and evaluation tools for benchmarki
 ### From Source (Development)
 ```bash
 git clone https://github.com/kuang-da/CellTreeBench.git
-cd CellTreeBench
+# Build the devcontainer
+# Then cd into the root directory /workspaces/CellTreeBench
 pip install -e .
 ```
 

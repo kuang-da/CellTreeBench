@@ -10,3 +10,4 @@ examples/out
 examples/supervised_training.ipynb
 src/celltreebench/curation
 data
+__pycache__

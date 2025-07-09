@@ -15,7 +15,7 @@ import torch.optim as optim
 import numpy as np
 
 # Add the CellTreeBench to path for imports
-sys.path.append("/workspaces/1-phydist/main/CellTreeBench")
+sys.path.append("/workspaces/CellTreeBench")
 
 # Import our minimal utilities
 from utils_minimal import (
@@ -362,7 +362,7 @@ def main():
         # Dataset
         "dataset_name": "celegans_small",
         "lineage_name": "P0",
-        "base_dir": "/workspaces/1-phydist/main/CellTreeBench",
+        "base_dir": "/workspaces/CellTreeBench",
         # Training
         "lr": 0.0001,
         "weight_decay": 0.01,
