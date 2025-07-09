@@ -1,0 +1,1 @@
+error: failed to solve: process "/bin/sh -c apt-get update     && apt-get install --no-install-recommends --yes         curl         unzip         g++         vim         wget         ca-certificates         git     && apt-get clean     && rm -rf /var/lib/apt/lists/*" did not complete successfully: exit code: 100

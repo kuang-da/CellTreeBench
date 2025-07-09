@@ -1,0 +1,164 @@
+Metadata-Version: 2.4
+Name: celltreebench
+Version: 0.0.1
+Summary: A benchmark dataset for cell lineage tree reconstruction.
+Author-email: Da Kuang <kuangda@seas.upenn.edu>
+Project-URL: Homepage, https://kuang-da.github.io/CellTreeQM-page/
+Project-URL: Bug Tracker, https://github.com/kuang-da/CellTreeBench/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# CellTreeBench
+
+A benchmark dataset for cell lineage tree reconstruction from single-cell data. This repository is the dataset part of CellTreeQM (https://kuang-da.github.io/CellTreeQM-page/).
+
+## Overview
+
+CellTreeBench provides standardized datasets and evaluation tools for benchmarking methods that reconstruct cell lineage trees from single-cell RNA sequencing data and other molecular measurements. The package includes multiple real and simulated datasets, preprocessing utilities, evaluation metrics, and ready-to-use train/test splits for supervised learning approaches.
+
+## Features
+
+- **Multiple Dataset Types**: Sythetic datasets by brownian motion, C. elegans lineage data, C. briggsae, Cripsr-barcode, and Species-level DNA methylation data
+- **Standardized Splits**: Pre-computed train/test splits with biological and technical sampling strategies
+- **Evaluation Metrics**: Distance metrics and reconstruction evaluation tools
+- **Tree Operations**: Utilities for tree manipulation, quartet generation, and lineage analysis
+- **Easy-to-Use API**: Simple functions to load datasets with consistent interfaces
+
+## Installation
+
+### From Source (Development)
+```bash
+git clone https://github.com/kuang-da/CellTreeBench.git
+cd CellTreeBench
+pip install -e .
+```
+
+### Requirements
+- Python ≥ 3.8
+- Dependencies will be installed automatically via pip
+
+## Quick Start
+
+### Loading C. elegans Dataset
+```python
+from celltreebench.datasets.celegans import load_celegans_supervised_split
+
+# Load train and test splits
+train_dataset, test_dataset = load_celegans_supervised_split(
+    dataset_name="celegans_small",  # or "celegans_mid", "celegans_large"
+    lineage_name="P0",
+    data_dir="./data",
+    out_dir="./output",
+    sampling_method="biological",
+    seed=42
+)
+
+print(f"Train shape: {train_dataset.data_normalized.shape}")
+print(f"Test shape: {test_dataset.data_normalized.shape}")
+```
+
+### Available Datasets
+
+| Dataset Type | Description | Variants |
+|--------------|-------------|----------|
+| **C. elegans** | Early embryonic development lineage trees with scRNA-seq | `celegans_small`, `celegans_mid`, `celegans_large` |
+| **Tumor** | Cancer phylogenies from single-cell data | Multiple cancer types |
+| **DNA Methylation** | DNA methylation-based lineage reconstruction | Species-specific datasets |
+| **Mutation** | Mutation-based lineage tracking | Various experimental systems |
+| **ARW** | Simulated data using Aldous Random Walk models | Configurable simulation parameters |
+
+## Examples
+
+### Basic Usage
+See `examples/supervised_split_example.ipynb` for a complete walkthrough of:
+- Loading different dataset sizes
+- Understanding data formats
+- Working with train/test splits
+- Accessing lineage trees and metadata
+
+### Advanced Usage
+```python
+# Custom quartet sampling
+train_dataset, test_dataset = load_celegans_supervised_split(
+    dataset_name="celegans_mid",
+    sampling_method="technical",
+    quartet_sampling_method="stratified",
+    subset_leaves=100  # Use subset for faster prototyping
+)
+
+# Access tree topology and distances
+topology_tree = train_dataset.topology_tree
+distance_matrix = train_dataset.ref_dists
+```
+
+## Data Format
+
+Each dataset provides:
+- **Gene Expression**: Normalized count matrices (`data_normalized`)
+- **Lineage Trees**: Ground truth tree topologies in various formats
+- **Distance Matrices**: Precomputed reference distances between cells
+- **Metadata**: Cell annotations, developmental stages, lineage information
+- **Quartets**: Precomputed quartet relationships for training/evaluation
+
+## Evaluation Tools
+
+The package includes utilities for evaluating reconstruction methods:
+
+```python
+from celltreebench.utils.reconstruction_eval import evaluate_reconstruction
+from celltreebench.utils.distance_metrics import compute_tree_distance
+
+# Evaluate reconstructed tree against ground truth
+metrics = evaluate_reconstruction(predicted_tree, ground_truth_tree)
+```
+
+## Project Structure
+
+```
+CellTreeBench/
+├── src/celltreebench/
+│   ├── datasets/          # Dataset loaders and processors
+│   ├── utils/             # Utility functions
+│   ├── metrics/           # Evaluation metrics
+│   └── curation/          # Data curation tools
+├── examples/              # Jupyter notebook examples
+├── tests/                 # Unit tests
+└── data/                  # Dataset storage (not included in repo)
+```
+
+## Contributing
+
+We welcome contributions! Please see our [GitHub repository](https://github.com/kuang-da/CellTreeBench) for:
+- Bug reports and feature requests
+- Code contributions
+- Dataset additions
+- Documentation improvements
+
+## Citation
+
+If you use CellTreeBench in your research, please cite our paper:
+
+```bibtex
+@software{celltreebench2024,
+  title={CellTreeBench: A Benchmark Dataset for Cell Lineage Tree Reconstruction},
+  author={Kuang, Da},
+  year={2024},
+  url={https://github.com/kuang-da/CellTreeBench}
+}
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Links
+
+- **Homepage**: https://kuang-da.github.io/CellTreeQM-page/
+- **Documentation**: [GitHub Repository](https://github.com/kuang-da/CellTreeBench)
+- **Bug Reports**: [Issues](https://github.com/kuang-da/CellTreeBench/issues)
+
