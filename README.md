@@ -75,6 +75,7 @@ print(f"Dataset path: {get_dataset_path('celegans_small')}")
 | Dataset Type | Description | Variants |
 |--------------|-------------|----------|
 | **C. elegans** | Early embryonic development lineage trees with scRNA-seq | `celegans_small`, `celegans_mid`, `celegans_large` |
+| **C. briggsae** | Early embryonic development lineage trees with scRNA-seq | `briggsae_mid` |
 | **Tumor** | Cancer phylogenies from single-cell data | Multiple cancer types |
 | **DNA Methylation** | DNA methylation-based lineage reconstruction | Species-specific datasets |
 | **Mutation** | Mutation-based lineage tracking | Various experimental systems |
@@ -153,34 +154,6 @@ python -m pytest -v
 
 The test suite includes 30+ unit and integration tests covering configuration, path discovery, dataset loading, and backward compatibility.
 
-## Contributing
-
-We welcome contributions! Please see our [GitHub repository](https://github.com/kuang-da/CellTreeBench) for:
-- Bug reports and feature requests
-- Code contributions
-- Dataset additions
-- Documentation improvements
-
-## Citation
-
-If you use CellTreeBench in your research, please cite our paper:
-
-```bibtex
-@software{celltreebench2024,
-  title={CellTreeBench: A Benchmark Dataset for Cell Lineage Tree Reconstruction},
-  author={Kuang, Da},
-  year={2024},
-  url={https://github.com/kuang-da/CellTreeBench}
-}
-```
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Links
-
-- **Homepage**: https://kuang-da.github.io/CellTreeQM-page/
-- **Documentation**: [GitHub Repository](https://github.com/kuang-da/CellTreeBench)
-- **Bug Reports**: [Issues](https://github.com/kuang-da/CellTreeBench/issues)
-
