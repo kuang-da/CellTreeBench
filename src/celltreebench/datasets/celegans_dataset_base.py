@@ -11,9 +11,11 @@ import torch
 import random
 from itertools import combinations
 from math import comb
+from pathlib import Path
 
 from celltreebench.utils.reconstruction_eval import compare_trees
 from celltreebench.utils.tree_operations import get_path_distance_matrix
+from celltreebench.config import get_package_root, get_data_root
 
 # Configure logging
 logging.basicConfig(
@@ -25,11 +27,21 @@ logging.basicConfig(
 # Get a logger object
 logger = logging.getLogger(__name__)
 
-# Find the project root
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..")
-)
-DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+
+# Get the data root using the robust method
+try:
+    PROJECT_ROOT = get_package_root()
+    DATA_ROOT = get_data_root()
+    logger.info(f"Package root: {PROJECT_ROOT}")
+    logger.info(f"Data root: {DATA_ROOT}")
+except Exception as e:
+    logger.error(f"Failed to determine project paths: {e}")
+    # Fallback to original method if all else fails
+    PROJECT_ROOT = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..")
+    )
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
+    logger.warning("Using fallback path detection method")
 
 
 class CElegansDatasetBase(Dataset):
@@ -40,7 +52,7 @@ class CElegansDatasetBase(Dataset):
         dist_metric="euclidean",
         data_dir=None,
         out_dir=None,
-        dataset_name="celegans_dev",  # "celegans_dev" or "celegans_packer"
+        dataset_name="celegans_small",  # "celegans_small", "celegans_mid", "celegans_large"
         lineage_name="P0",
         subset_tree_with_leaves=None,
         # leaves_metadata_with_levels=True,
@@ -56,29 +68,28 @@ class CElegansDatasetBase(Dataset):
         self.sampling_method = quartet_sampling_method
 
         assert dataset_name in [
-            # "celegans_dev",
             "celegans_small",
             "celegans_mid",
             "celegans_large",
-            # "celegans_packer",
+            "cbriggsae_mid",
         ], "Invalid dataset name"
         self.dataset_name = dataset_name
 
         if data_dir is None:
             data_dir = DATA_ROOT
 
-        self.data_dir = os.path.join(data_dir, dataset_name)
+        self.data_dir = Path(data_dir) / dataset_name
         # If data_dir does not exist, raise an error
-        if not os.path.exists(self.data_dir):
+        if not self.data_dir.exists():
             raise ValueError(f"Data directory does not exist: {self.data_dir}")
 
         # Initialize parameters
         self.lineage_name = lineage_name
         self.dist_metric = dist_metric
-        self.out_dir = out_dir
-        if not os.path.exists(self.out_dir):
+        self.out_dir = Path(out_dir) if out_dir else None
+        if self.out_dir and not self.out_dir.exists():
             logger.info(f"Creating output directory: {self.out_dir}")
-            os.makedirs(self.out_dir)
+            self.out_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize data attributes
         self.data_normalized = None
@@ -208,12 +219,14 @@ class CElegansDatasetBase(Dataset):
         if self.dataset_name == "celegans_small":
             file_name = f"tree_df-{self.lineage_name}.csv"
         elif (
-            self.dataset_name == "celegans_mid" or self.dataset_name == "celegans_large"
+            self.dataset_name == "celegans_mid" 
+            or self.dataset_name == "celegans_large"
+            or self.dataset_name == "cbriggsae_mid"
         ):
             file_name = "p0-topology_tree.nwk"
 
-        file_name = os.path.join(self.data_dir, self.lineage_name, file_name)
-        if not os.path.exists(file_name):
+        file_name = self.data_dir / self.lineage_name / file_name
+        if not file_name.exists():
             raise FileNotFoundError(f"Lineage tree file not found: {file_name}")
 
         tree = self._create_tree(file_name, self.dataset_name)
@@ -222,8 +235,8 @@ class CElegansDatasetBase(Dataset):
     def _save_tree_to_file(self):
         """Save the topology tree to files in ASCII and pickle formats."""
         if self.out_dir:
-            topology_txt = os.path.join(self.out_dir, "topology_tree-ncells.txt")
-            topology_pickle = os.path.join(self.out_dir, "topology_tree.pickle")
+            topology_txt = self.out_dir / "topology_tree-ncells.txt"
+            topology_pickle = self.out_dir / "topology_tree.pickle"
 
             with open(topology_txt, "w") as f:
                 f.write(self.topology_tree.get_ascii(attributes=["name", "n_cells"]))
@@ -239,13 +252,15 @@ class CElegansDatasetBase(Dataset):
         """Load the metadata table."""
         if self.dataset_name == "celegans_small":
             file_name = "metadata.csv"
-        if self.dataset_name == "celegans_large":
+        elif self.dataset_name == "celegans_large":
             file_name = "GSE126954_cell_annotation.csv"
-        if self.dataset_name == "celegans_mid":
+        elif self.dataset_name == "celegans_mid":
             file_name = "c_elegans_cell_meta.csv"
+        elif self.dataset_name == "cbriggsae_mid":
+            file_name = "c_briggsae_cell_meta.csv"
 
-        file_name = os.path.join(self.data_dir, "raw", file_name)
-        if not os.path.exists(file_name):
+        file_name = self.data_dir / "raw" / file_name
+        if not file_name.exists():
             raise FileNotFoundError(f"Metadata file not found: {file_name}")
 
         if self.dataset_name == "celegans_small":
@@ -254,6 +269,7 @@ class CElegansDatasetBase(Dataset):
             metadata_df = metadata_df.set_index("cell", drop=False)
             # Prepare the leaf column
             metadata_df["leaf"] = metadata_df["lineage_packer"]
+        
         elif self.dataset_name == "celegans_large":
             metadata_df = pd.read_csv(file_name, index_col=0)
             metadata_df["og_idx"] = range(len(metadata_df))
@@ -263,21 +279,39 @@ class CElegansDatasetBase(Dataset):
             # So that we can map cells to leaves.
             # Only the cells belong to the lineage with have non-empty leaf column.
             file_name = f"{self.lineage_name}-cell_to_leaf_df.csv"
-            file_name = os.path.join(self.data_dir, self.lineage_name, file_name)
+            file_name = self.data_dir / self.lineage_name / file_name
             cell_to_leaf_df = pd.read_csv(file_name)
             # Merge "regex_joined" and "leaf" columns to metadata_df
             metadata_df = metadata_df.merge(cell_to_leaf_df, on="og_idx", how="left")
             # Only keep the cells that have a leaf
             metadata_df = metadata_df[metadata_df.leaf.notna()]
+        
         elif self.dataset_name == "celegans_mid":
             metadata_df = pd.read_csv(file_name, index_col=0)
+        
+        elif self.dataset_name == "cbriggsae_mid":
+            metadata_df = pd.read_csv(file_name, index_col=0)
+            # Add cell column to match the index (cell identifiers)
+            metadata_df["cell"] = metadata_df.index
+
+            # For cbriggsae dataset, the cells for the lineage are pre-selected in cell_to_leaf_df.
+            # We need to load the file and merge it with the metadata_df.
+            # So that we can map cells to leaves.
+            # Only the cells belong to the lineage will have non-empty leaf column.
+            file_name = f"{self.lineage_name}-cell_to_leaf_df.csv"
+            file_name = self.data_dir / self.lineage_name / file_name
+            cell_to_leaf_df = pd.read_csv(file_name, index_col=0)
+            # Merge "regex_joined" and "leaf" columns to metadata_df using index
+            metadata_df = metadata_df.merge(cell_to_leaf_df, left_index=True, right_index=True, how="inner")
+            # The merge with how="inner" already filters to cells that have a leaf
+        
         return metadata_df
 
     def _load_expression_data(self):
         """Load gene expression data and cache it."""
         cache_file = "exprs_df_cache.pkl"
-        cache_file = os.path.join(self.data_dir, self.lineage_name, cache_file)
-        if os.path.exists(cache_file):
+        cache_file = self.data_dir / self.lineage_name / cache_file
+        if cache_file.exists():
             logger.info(f"Loading cached gene expression data from {cache_file}")
             with open(cache_file, "rb") as f:
                 exprs_df = pickle.load(f)
@@ -289,6 +323,8 @@ class CElegansDatasetBase(Dataset):
                 exprs_df = self._load_expression_data_large()
             elif self.dataset_name == "celegans_mid":
                 exprs_df = self._load_expression_data_mid()
+            elif self.dataset_name == "cbriggsae_mid":
+                exprs_df = self._load_expression_data_cbriggsae_mid()
             print(
                 f"exprs_df.shape: {exprs_df.shape}, metadata_df.shape: {self.metadata_df.shape}"
             )
@@ -316,23 +352,29 @@ class CElegansDatasetBase(Dataset):
 
     def _load_expression_data_mid(self):
         file_name = "c_elegans_expression_df.csv"
-        file_name = os.path.join(self.data_dir, "raw", file_name)
+        file_name = self.data_dir / "raw" / file_name
+        exprs_df = pd.read_csv(file_name, index_col=0)
+        return exprs_df
+
+    def _load_expression_data_cbriggsae_mid(self):
+        file_name = "c_briggsae_expression_df.csv"
+        file_name = self.data_dir / "raw" / file_name
         exprs_df = pd.read_csv(file_name, index_col=0)
         return exprs_df
 
     def _load_expression_data_large(self):
         file_name = "GSE126954_gene_by_cell_count_matrix.txt"
-        file_name = os.path.join(self.data_dir, "raw", file_name)
+        file_name = self.data_dir / "raw" / file_name
         expression_adata = mmread(file_name)  # (n_genes, n_cells)
         org_idx = range(expression_adata.shape[1])
 
         file_name = "GSE126954_gene_annotation.csv"
-        file_name = os.path.join(self.data_dir, "raw", file_name)
+        file_name = self.data_dir / "raw" / file_name
         all_gene_names = pd.read_csv(file_name)
         all_gene_names = all_gene_names["gene_short_name"].values
 
-        file_name = os.path.join("GSE126954_cell_annotation.csv")
-        file_name = os.path.join(self.data_dir, "raw", file_name)
+        file_name = "GSE126954_cell_annotation.csv"
+        file_name = self.data_dir / "raw" / file_name
         cell_annotation_df = pd.read_csv(file_name, index_col=0)
         all_cell_names = cell_annotation_df.index.tolist()
 
@@ -347,17 +389,17 @@ class CElegansDatasetBase(Dataset):
     def _load_expression_data_small(self):
         """Load expression data from files and cache it."""
         # Load row names (cell barcodes)
-        barcodes_file = os.path.join(self.data_dir, "raw", "cell_barcodes.csv")
+        barcodes_file = self.data_dir / "raw" / "cell_barcodes.csv"
         barcodes_list = pd.read_csv(barcodes_file, header=None).values.flatten()
         logger.info(f"Loaded barcodes from {barcodes_file}")
 
         # Load column names (genes)
-        genes_file = os.path.join(self.data_dir, "raw", "genes.csv")
+        genes_file = self.data_dir / "raw" / "genes.csv"
         genes_list = pd.read_csv(genes_file, header=None).values.flatten()
         logger.info(f"Loaded gene list from {genes_file}")
 
         # Load sparse matrix (gene expression data)
-        exprs_file = os.path.join(self.data_dir, "raw", "exprs.mm")
+        exprs_file = self.data_dir / "raw" / "exprs.mm"
         sparse_matrix = mmread(exprs_file)
         logger.info(f"Loaded sparse expression matrix from {exprs_file}")
 
@@ -451,7 +493,11 @@ class CElegansDatasetBase(Dataset):
             tree = self._create_tree_from_dataframe(tree_df)
             self._remove_leaves_with_zero_cells(tree)
             return tree
-        elif dataset_name == "celegans_large" or dataset_name == "celegans_mid":
+        elif (
+            dataset_name == "celegans_large" 
+            or dataset_name == "celegans_mid"
+            or dataset_name == "cbriggsae_mid"
+        ):
             tree = Tree(tree_file_name, format=1)
         else:
             raise ValueError("Unknown dataset name")

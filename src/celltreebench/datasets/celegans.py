@@ -4,7 +4,7 @@ from .celegans_dataset_supervised import CElegansDatasetSupervised
 
 
 def load_celegans_supervised_split(
-    dataset_name="celegans_dev",
+    dataset_name="celegans_small",  # "celegans_small", "celegans_mid", "celegans_large"
     lineage_name="P0",
     data_dir=None,
     out_dir=None,

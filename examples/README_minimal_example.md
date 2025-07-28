@@ -43,7 +43,7 @@ You only need access to:
 ### Running the Training
 
 ```bash
-cd /workspaces/1-phydist/main/CellTreeBench/examples
+cd /workspaces/CellTreeBench/examples
 python train_minimal_example.py
 ```
 

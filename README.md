@@ -6,6 +6,13 @@ A benchmark dataset for cell lineage tree reconstruction from single-cell data. 
 
 CellTreeBench provides standardized datasets and evaluation tools for benchmarking methods that reconstruct cell lineage trees from single-cell RNA sequencing data and other molecular measurements. The package includes multiple real and simulated datasets, preprocessing utilities, evaluation metrics, and ready-to-use train/test splits for supervised learning approaches.
 
+## Recent Updates 🆕
+
+- **Robust Configuration System**: Modern path discovery with multiple fallback strategies and environment variable support
+- **Comprehensive Test Suite**: 30+ unit and integration tests ensuring reliability across different environments
+- **Pathlib Integration**: Modern Python path handling for better cross-platform compatibility
+- **User-Configurable Paths**: Support for custom data directories via `CELLTREEBENCH_DATA_DIR` environment variable
+
 ## Features
 
 - **Multiple Dataset Types**: Sythetic datasets by brownian motion, C. elegans lineage data, C. briggsae, Cripsr-barcode, and Species-level DNA methylation data
@@ -13,6 +20,7 @@ CellTreeBench provides standardized datasets and evaluation tools for benchmarki
 - **Evaluation Metrics**: Distance metrics and reconstruction evaluation tools
 - **Tree Operations**: Utilities for tree manipulation, quartet generation, and lineage analysis
 - **Easy-to-Use API**: Simple functions to load datasets with consistent interfaces
+- **Robust Configuration**: Automatic data directory detection with environment variable overrides
 
 ## Installation
 
@@ -28,17 +36,27 @@ pip install -e .
 - Python ≥ 3.8
 - Dependencies will be installed automatically via pip
 
+### Configuration (Optional)
+```bash
+# Set custom data directory (optional)
+export CELLTREEBENCH_DATA_DIR="/path/to/your/data"
+
+# Set custom package root (rarely needed)
+export CELLTREEBENCH_ROOT="/path/to/package/root"
+```
+
+The package automatically detects data directories, but you can override defaults using environment variables for custom installations.
+
 ## Quick Start
 
 ### Loading C. elegans Dataset
 ```python
 from celltreebench.datasets.celegans import load_celegans_supervised_split
 
-# Load train and test splits
+# Load train and test splits (data_dir auto-detected)
 train_dataset, test_dataset = load_celegans_supervised_split(
     dataset_name="celegans_small",  # or "celegans_mid", "celegans_large"
     lineage_name="P0",
-    data_dir="./data",
     out_dir="./output",
     sampling_method="biological",
     seed=42
@@ -46,6 +64,15 @@ train_dataset, test_dataset = load_celegans_supervised_split(
 
 print(f"Train shape: {train_dataset.data_normalized.shape}")
 print(f"Test shape: {test_dataset.data_normalized.shape}")
+```
+
+### Configuration Management
+```python
+# Access configuration programmatically
+from celltreebench.config import get_data_root, get_dataset_path
+
+print(f"Data directory: {get_data_root()}")
+print(f"Dataset path: {get_dataset_path('celegans_small')}")
 ```
 
 ### Available Datasets
@@ -111,11 +138,25 @@ CellTreeBench/
 │   ├── datasets/          # Dataset loaders and processors
 │   ├── utils/             # Utility functions
 │   ├── metrics/           # Evaluation metrics
+│   ├── config.py          # Centralized configuration management
 │   └── curation/          # Data curation tools
 ├── examples/              # Jupyter notebook examples
-├── tests/                 # Unit tests
+├── tests/                 # Comprehensive test suite (30+ tests)
+│   ├── test_config.py     # Configuration system tests
+│   └── test_datasets_integration.py  # Dataset integration tests
+├── notebooks/             # Jupyter notebooks for data curation
 └── data/                  # Dataset storage (not included in repo)
 ```
+
+### Testing
+
+Run the test suite to verify your installation:
+```bash
+cd tests
+python -m pytest -v
+```
+
+The test suite includes 30+ unit and integration tests covering configuration, path discovery, dataset loading, and backward compatibility.
 
 ## Contributing
 

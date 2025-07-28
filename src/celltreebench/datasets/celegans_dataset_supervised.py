@@ -33,7 +33,7 @@ class CElegansDatasetSupervised(CElegansDatasetBase):
         dist_metric="euclidean",  # ------------------- Base parameters
         data_dir=None,
         out_dir=None,
-        dataset_name=None,  # "celegans_dev" or "celegans_packer"
+        dataset_name=None,  # "celegans_small", "celegans_mid", "celegans_large"
         lineage_name="P0",
         subset_tree_with_leaves=None,
         quartet_sampling_method="random",  # "random" or "exhaustive"
