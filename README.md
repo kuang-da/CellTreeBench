@@ -6,7 +6,7 @@ A benchmark dataset for cell lineage tree reconstruction from single-cell data. 
 
 CellTreeBench provides standardized datasets and evaluation tools for benchmarking methods that reconstruct cell lineage trees from single-cell RNA sequencing data and other molecular measurements. The package includes multiple real and simulated datasets, preprocessing utilities, evaluation metrics, and ready-to-use train/test splits for supervised learning approaches.
 
-This repository is under active development: we’re enhancing the dataset class, expanding the preprocessing pipeline, and integrating additional modalities.
+**This repository is under active development: we’re enhancing the dataset class, expanding the preprocessing pipeline, and integrating additional modalities.**
 
 ## Features
 
