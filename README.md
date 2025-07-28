@@ -79,7 +79,7 @@ print(f"Dataset path: {get_dataset_path('celegans_small')}")
 | **Tumor** | Cancer phylogenies from single-cell data | Multiple cancer types |
 | **DNA Methylation** | DNA methylation-based lineage reconstruction | Species-specific datasets |
 | **Mutation** | Mutation-based lineage tracking | Various experimental systems |
-| **ARW** | Simulated data using Aldous Random Walk models | Configurable simulation parameters |
+| **ARW** | Simulated data using Random Walk models | Configurable simulation parameters |
 
 ## Examples
 
