@@ -128,7 +128,7 @@ def create_model(input_dim, device="cpu"):
 
 
 def train_one_epoch(
-    model, train_dataset, test_dataset, optimizer, epoch, config, device="cpu"
+    model, train_dataset, test_dataset, optimizer, epoch, config, device="cpu", gen=None
 ):
     """
     Train the model for one epoch using the research codebase's unconventional design:
@@ -145,6 +145,7 @@ def train_one_epoch(
         epoch (int): Current epoch number.
         config (dict): Training configuration.
         device (str): Device for computation.
+        gen (torch.Generator): Random number generator for reproducibility.
 
     Returns:
         dict: Dictionary containing metrics for this epoch.
@@ -196,7 +197,7 @@ def train_one_epoch(
 
         proportions = train_dataset.get_proportions()
         proportions = torch.tensor(proportions, dtype=torch.float)
-        samples = torch.multinomial(proportions, batch_size, replacement=True)  # draw N samples with replacement according to proportions
+        samples = torch.multinomial(proportions, batch_size, replacement=True, generator=gen)  # draw N samples with replacement according to proportions
         counts = samples.bincount(minlength=len(proportions)) # count how many times each group was chosen
 
         batch_D = 0
@@ -224,6 +225,7 @@ def train_one_epoch(
                     dm=dm,
                     dm_ref=dm_ref[i],
                     device=device,
+                    seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
                     )
                 # Compute quartet loss based on metric_loss_type
                 if metric_loss_type == "additivity":
@@ -263,9 +265,9 @@ def train_one_epoch(
                 else:
                     raise ValueError(f"Invalid metric loss: {metric_loss_type}")
         # multiplied by count inside of loop to ensure that each metric is represennted based on how manny quartets from that tree are used then we average here:
-        batch_P /= counts
-        batch_P_close /= counts
-        batch_P_push /= counts
+        batch_P /=sum(counts)
+        batch_P_close /= sum(counts)
+        batch_P_push /= sum(counts)
 
         # 3. Feature Gate Loss (if applicable)
         gate_loss = torch.tensor(0.0, device=device)
@@ -301,12 +303,12 @@ def train_one_epoch(
 
                 # Evaluate on train set
                 train_metrics = evaluate_model(
-                    model, train_dataset, config, device, "train"
+                    model, train_dataset, config, device, "train", gen=gen
                 )
 
                 # Evaluate on test set
                 test_metrics = evaluate_model(
-                    model, test_dataset, config, device, "test"
+                    model, test_dataset, config, device, "test", gen=gen
                 )
 
                 # Store evaluation results
@@ -315,8 +317,8 @@ def train_one_epoch(
                     "step": step_count,
                     "train_rf": train_metrics["rf_train"],
                     "test_rf": test_metrics["rf_test"],
-                    # "train_quartet_dist": train_metrics["quartet_dist_train"],
-                    # "test_quartet_dist": test_metrics["quartet_dist_test"],
+                    "train_quartet_dist": train_metrics["quartet_dist_train"],
+                    "test_quartet_dist": test_metrics["quartet_dist_test"],
                     "loss": total_loss.item(),
                     "loss_D": batch_D.item(),
                     "loss_P": batch_P.item(),
@@ -344,7 +346,7 @@ def train_one_epoch(
 
             model.train()  # Return to train mode
 
-    # Calculate average loss for the epoch
+    # Calculate average loss  the epoch
     avg_epoch_loss = running_loss / max_step if max_step > 0 else running_loss
 
     return {
@@ -354,7 +356,7 @@ def train_one_epoch(
     }
 
 
-def evaluate_model(model, dataset, config, device="cpu", dataset_name="train"):
+def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", gen=None):
     """
     Evaluate the model on a dataset.
 
@@ -405,12 +407,13 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train"):
                 dm=dm,
                 dm_ref=dm_ref,
                 device=device,
+                seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
             )
             quartet_dist = get_quartet_dist(dm_quartets, dm_ref_quartets)
             eval_results[f"rf_{dataset_name}"].append(emb_topo_res["rf"])
             eval_results[f"rf_max_{dataset_name}"].append(emb_topo_res["max_rf"])
             eval_results[f"quartet_dist_{dataset_name}"].append(quartet_dist.item())
-        eval_results[f"rf_{dataset_name}"] = sum(eval_results["rf_train"])/sum(eval_results["rf_max_train"])
+        eval_results[f"rf_{dataset_name}"] = sum(eval_results[f"rf_{dataset_name}"])/sum(eval_results[f"rf_max_{dataset_name}"])
         return eval_results
 
 
@@ -433,8 +436,8 @@ def main():
         "weight_push": 30.0,
         "push_margin": 0.1,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
-        "num_epochs": 60,
-        "eval_interval": 2000,
+        "num_epochs": 3,
+        "eval_interval": 300,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
@@ -445,10 +448,12 @@ def main():
 
     device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
+    gen = torch.Generator().manual_seed(42)  # Set seed for reproducibility
+    torch.manual_seed(42)  # Set global seed for reproducibility
 
     # Load dataset
-    logging.info("Loading C. elegans dataset...")
-    data_dir = f"{config['base_dir']}/data"
+    logging.info("Loading phylogenetic dataset...")
+    data_dir = f"{config['base_dir']}/data/"
     out_dir = f"{config['base_dir']}/examples/out/phylogenetic_{config['dataset_name']}"
     os.makedirs(out_dir, exist_ok=True)
     train_dataset, test_dataset = load_phylo_supervised_split( #Loads and splits phylo dataset
@@ -461,7 +466,7 @@ def main():
 
     logging.info(f"Train shape: {train_dataset.data_normalized[0].shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
-    logging.info(f"Number of leaves: {train_dataset.n_leaves}")
+    # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
 
     # Get input dimension
     input_dim = train_dataset.data_normalized[0].shape[1]
@@ -511,7 +516,7 @@ def main():
 
         # Train one epoch (handles multiple steps and evaluations internally)
         epoch_results = train_one_epoch(
-            model, train_dataset, test_dataset, optimizer, epoch, config, str(device)
+            model, train_dataset, test_dataset, optimizer, epoch, config, str(device), gen=gen
         )
 
         # Store epoch-level metrics

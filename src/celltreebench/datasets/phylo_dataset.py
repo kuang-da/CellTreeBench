@@ -44,15 +44,7 @@ class PhyloDataset(Dataset):
         self.data_dir = data_dir
         self.topology_trees = self._read_all_trees(tree_directory)
         self.data = self._read_all_msas(msa_directory)
-
-        self.leave_names = [leaf.name for leaf in self.topology_tree.iter_leaves()]
-        self.n_leaves = len(self.leave_names)
-        self.ref_dm = [get_path_distance_matrix(tree, self.leave_names) for tree in self.topology_trees]
-
         
-        self.total_quartets = comb(self.n_leaves, 4)
-        self.data_normalized = self._zero_pad(self.data) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
-
     def _read_phylogenetic_tree(self, filename, tree_directory):
         """Read phylogenetic tree
     
@@ -62,7 +54,7 @@ class PhyloDataset(Dataset):
         Returns:
             Tree: ETE3 Tree object representing the phylogenetic tree.
         """
-        tree = Tree(os.path.join(self.data_dir, self.dataset_name, tree_directory, filename))
+        tree = Tree(os.path.join(self.data_dir, self.dataset_name, tree_directory, filename), name=filename)
         return tree
     
     def _read_all_trees(self, tree_directory):
@@ -124,30 +116,17 @@ class PhyloDataset(Dataset):
                 msas.append(msa)
         return msas
     
-    def get_node_mtx(self):
-        """
-        Returns a dictionary containing the node matrix and node names.
-
-        Returns:
-            dict: A dictionary with 'node_mtx' as a NumPy array of the normalized data
-            and 'node_names' as the corresponding index.
-        """
-        return {
-            "node_mtx": self.data_normalized.to_numpy(),
-            "node_names": self.data_normalized.index,
-        }
-    
     def get_proportions(self):
         """
         Returns the proportions of each tree (based on number of leaves) in the dataset.
 
         """
-        return [comb(4, len(tree.get_leaves())) for tree in self.topology_trees]
+        return [comb(len(tree.get_leaves()), 4) for tree in self.topology_trees]
     
     def __len__(self):
-        return sum(self.get_proportions)
+        return sum(self.get_proportions())
     
-    def _zero_pad(self, data):
+    def _zero_pad(self, data, max_length):
         """
         Zero pad the data to ensure all MSAs have the same length.
         
@@ -157,7 +136,6 @@ class PhyloDataset(Dataset):
         Returns:
             list: List of DataFrames with zero padding applied.
         """
-        max_length = max(df.shape[1] for df in data)
         padded_data = []
         for df in data:
             if df.shape[1] < max_length:
@@ -198,19 +176,34 @@ class PhyloDataset(Dataset):
             raise ValueError("Unknown reference tree specified.")
 
         return compare_trees(tree1, tree2, unrooted_trees=unrooted)
-                                                                                                                                                                                                            
+    
+    def create_data_normalized(self, max_length=0):
+        self.data_normalized = self._zero_pad(self.data, max_length) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
+
+    def create_ref_dm(self):
+        self.ref_dm = []  # List of reference distance matrices for each topology tree
+        for tree in self.topology_trees:
+            leave_names = [leaf.name for leaf in tree.iter_leaves()]
+            self.ref_dm.append(get_path_distance_matrix(tree, leave_names))
+
 def load_phylo_supervised_split(dataset_name=None, data_dir=DATA_ROOT, out_dir=None):
     """Load phylogenetic dataset with precomputed train/test splits. Very simple method that does not split. It only loads separate datasets."""
     train_dataset= PhyloDataset(
-        dataset_name=dataset_name,
+        dataset_name=os.path.join(dataset_name, "train"),
         tree_directory="trees",
         msa_directory="msas",
-        data_dir=os.path.join(data_dir, "train")
+        data_dir=data_dir
     )
     test_dataset = PhyloDataset(
-        dataset_name=dataset_name,
+        dataset_name=os.path.join(dataset_name, "test"),
         tree_directory="trees",
         msa_directory="msas",
-        data_dir=os.path.join(data_dir, "test")
+        data_dir=data_dir
         )
+    max_length = max(df.shape[1] for df in train_dataset.data + test_dataset.data)
+    train_dataset.create_data_normalized(max_length)
+    test_dataset.create_data_normalized(max_length)
+    train_dataset.create_ref_dm()
+    test_dataset.create_ref_dm()
+
     return train_dataset, test_dataset
