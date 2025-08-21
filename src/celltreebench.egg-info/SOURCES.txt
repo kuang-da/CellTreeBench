@@ -2,6 +2,7 @@ LICENSE
 README.md
 pyproject.toml
 src/celltreebench/__init__.py
+src/celltreebench/config.py
 src/celltreebench.egg-info/PKG-INFO
 src/celltreebench.egg-info/SOURCES.txt
 src/celltreebench.egg-info/dependency_links.txt
@@ -22,3 +23,5 @@ src/celltreebench/utils/ddml_loss_utils.py
 src/celltreebench/utils/distance_metrics.py
 src/celltreebench/utils/reconstruction_eval.py
 src/celltreebench/utils/tree_operations.py
+tests/test_config.py
+tests/test_datasets_integration.py
