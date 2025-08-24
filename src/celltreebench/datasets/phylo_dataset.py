@@ -1,8 +1,6 @@
 import logging
 import os
 from torch.utils.data import Dataset
-from ete3 import Tree
-from Bio import SeqIO
 import pandas as pd
 from math import comb
 
@@ -20,102 +18,23 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Find the project root
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..")
-)
-DATA_ROOT = os.path.join(PROJECT_ROOT, "data")
-
 class PhyloDataset(Dataset):
     """
     Class for phylogenetic datasets.
     """
-    def __init__(self, dataset_name, tree_directory="trees", msa_directory="msas", data_dir=DATA_ROOT):
+    def __init__(self, msas, trees, max_length=0):
         """
         Initialize the PhyloDataset.
 
         Args:
-            dataset_name (str): Name of the dataset.
-            tree_name (str): Name of the phylogenetic tree file in the dataset.
-            data_dir (str): Directory where the dataset is stored.        
+            msas (list): List of DataFrames containing the MSA data.
+            trees (list): List of ETE3 Tree objects representing the phylogenetic trees.
         """
-        super().__init__()
-        self.dataset_name = dataset_name
-        self.data_dir = data_dir
-        self.topology_trees = self._read_all_trees(tree_directory)
-        self.data = self._read_all_msas(msa_directory)
-        
-    def _read_phylogenetic_tree(self, filename, tree_directory):
-        """Read phylogenetic tree
-    
-        Args:
-            tree_name (str): Name of the phylogenetic tree file in the dataset.
-        
-        Returns:
-            Tree: ETE3 Tree object representing the phylogenetic tree.
-        """
-        tree = Tree(os.path.join(self.data_dir, self.dataset_name, tree_directory, filename), name=filename)
-        return tree
-    
-    def _read_all_trees(self, tree_directory):
-        """Read all phylogenetic trees in the dataset directory.
-        
-        Args:
-            tree_directory (str): Directory containing the phylogenetic tree files.
-        
-        Returns:
-            list: List of ETE3 Tree objects representing the phylogenetic trees.
-        """
-        trees = []
-        for filename in os.listdir(os.path.join(self.data_dir, self.dataset_name, tree_directory)):
-            if filename.endswith(".nwk"):
-                tree = self._read_phylogenetic_tree(filename, tree_directory)
-                trees.append(tree)
-        return trees
-    
-    def _read_phylo_msa(self, filename, msa_directory, alphabet=b"ARNDCQEGHILKMFPSTWYVX-"):
-        """Read phylogenetic MSA
-        Args:
-            msa_name (str): Name of the MSA file in the dataset.
-        Returns:
-            pd.DataFrame: DataFrame containing the MSA data (one-hot encoded)
-        """
-        msa_file = os.path.join(self.data_dir, self.dataset_name, msa_directory, filename)
-        sequences, ids = [], []
-        lookup = {char: index for index, char in enumerate(alphabet)}
-        with open(msa_file, "rb") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith(b">"):
-                    ids.append(line[1:].decode("utf8"))
-                    sequences.append([])
-                else:
-                    for char in line:# iterate over each character in the sequence and convert to one-hot
-                        i = lookup[char]
-                        one_hot = [0] * len(alphabet)
-                        one_hot[i] = 1
-                        sequences[-1] += one_hot
-        # Convert to DataFrame
-        columns=[f"{site}_{letter}" for site in range(len(sequences[0]) // len(alphabet)) for letter in alphabet] 
-        # column format is "[site number]_[protein letter]" so total # of columns is # of sites * # of letters
-        return pd.DataFrame(sequences, index=ids, columns=columns)
-    
-    def _read_all_msas(self, msa_directory):
-        """Read all phylogenetic MSAs in the dataset directory.
-        
-        Args:
-            msa_directory (str): Directory containing the MSA files.
-        
-        Returns:
-            list: List of DataFrames containing the MSA data (one-hot encoded).
-        """
-        msas = []
-        for filename in os.listdir(os.path.join(self.data_dir, self.dataset_name, msa_directory)):
-            if filename.endswith(".fa"):
-                msa = self._read_phylo_msa(filename, msa_directory)
-                msas.append(msa)
-        return msas
-    
+        self.data = msas
+        self.data_normalized = self._zero_pad(self.data, max_length) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
+        self.topology_trees = trees
+        self.create_ref_dm()
+
     def get_proportions(self):
         """
         Returns the proportions of each tree (based on number of leaves) in the dataset.
@@ -176,34 +95,9 @@ class PhyloDataset(Dataset):
             raise ValueError("Unknown reference tree specified.")
 
         return compare_trees(tree1, tree2, unrooted_trees=unrooted)
-    
-    def create_data_normalized(self, max_length=0):
-        self.data_normalized = self._zero_pad(self.data, max_length) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
 
     def create_ref_dm(self):
         self.ref_dm = []  # List of reference distance matrices for each topology tree
         for tree in self.topology_trees:
             leave_names = [leaf.name for leaf in tree.iter_leaves()]
             self.ref_dm.append(get_path_distance_matrix(tree, leave_names))
-
-def load_phylo_supervised_split(dataset_name=None, data_dir=DATA_ROOT, out_dir=None):
-    """Load phylogenetic dataset with precomputed train/test splits. Very simple method that does not split. It only loads separate datasets."""
-    train_dataset= PhyloDataset(
-        dataset_name=os.path.join(dataset_name, "train"),
-        tree_directory="trees",
-        msa_directory="msas",
-        data_dir=data_dir
-    )
-    test_dataset = PhyloDataset(
-        dataset_name=os.path.join(dataset_name, "test"),
-        tree_directory="trees",
-        msa_directory="msas",
-        data_dir=data_dir
-        )
-    max_length = max(df.shape[1] for df in train_dataset.data + test_dataset.data)
-    train_dataset.create_data_normalized(max_length)
-    test_dataset.create_data_normalized(max_length)
-    train_dataset.create_ref_dm()
-    test_dataset.create_ref_dm()
-
-    return train_dataset, test_dataset
