@@ -484,7 +484,7 @@ def main():
     # Configuration
     config = {
         # Dataset
-        "dataset_name": "phylogenetic/small",
+        "dataset_name": "phylogenetic/complicated",
         "lineage_name": None,
         "base_dir": "/workspaces/CellTreeBench",
         # Training
@@ -494,10 +494,10 @@ def main():
         "weight_P": 20.0,
         "weight_close": 1.0,
         "weight_push": 30.0,
-        "push_margin": 0.05,
+        "push_margin": 0.1,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 2000,
+        "eval_interval": 200,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "manhattan",
@@ -506,13 +506,24 @@ def main():
         "device": "cuda:0" if torch.cuda.is_available() else "cpu",
     }
 
+    results = {
+        "epoch_avg_loss": [],
+        "all_evaluations": [],  # Store all evaluation results from all epochs
+        "base_eval": { # store base evaluations (NOTE: formatted differently than all_evaluations)
+            "nj": {},
+            "random_embedding": [],
+            "random_shuffle": [] 
+        },
+        "config": config # store config for later reference
+    }
+
     device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
     gen = torch.Generator().manual_seed(42)  # Set seed for reproducibility
     torch.manual_seed(42)  # Set global seed for reproducibility
 
     # Load dataset
-    logging.info("Loading phylogenetic dataset...")
+    logging.info(f"Loading {config['dataset_name']} dataset...")
     data_dir = f"{config['base_dir']}/data/"
     out_dir = f"{config['base_dir']}/examples/out/phylogenetic_{config['dataset_name']}"
     os.makedirs(out_dir, exist_ok=True)
@@ -541,13 +552,15 @@ def main():
                     f"Train Q-Dist: {train_base_eval['quartet_dist']:.4f} | "
                     f"Test Q-Dist: {test_base_eval['quartet_dist']:.4f}"
                 )
-    
+    results["base_eval"]["nj"] = {
+        "train": train_base_eval,
+        "test": test_base_eval
+    }
     logging.info(f"Train shape: {train_dataset.data_normalized[0].shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
     
-    
     base_evals = 4
-    for _ in range(base_evals):
+    for eval_num in range(base_evals):
         train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
         test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
         train_rand_embedding_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="embedding")
@@ -566,6 +579,17 @@ def main():
                     f"Train Q-Dist: {train_rand_eval['quartet_dist']:.4f} | "
                     f"Test Q-Dist: {test_rand_eval['quartet_dist']:.4f}"
                 )
+        results["base_eval"]["random_embedding"].append({
+            "train": train_rand_embedding_eval,
+            "test": test_rand_embedding_eval,
+            "eval": eval_num
+        })
+        results["base_eval"]["random_shuffle"].append({
+            "train": train_rand_eval,
+            "test": test_rand_eval,
+            "eval": eval_num
+        })
+        
         
     
     # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
@@ -606,10 +630,6 @@ def main():
     best_rf = float("inf")
     best_epoch = 0
     best_step = 0
-    results = {
-        "epoch_avg_loss": [],
-        "all_evaluations": [],  # Store all evaluation results from all epochs
-    }
 
     start_time = time.time()
     train_metrics = evaluate_model(
@@ -670,7 +690,7 @@ def main():
 
     # Save final results
     import pickle
-
+    results["total_time"] = total_time
     results_path = os.path.join(out_dir, "training_results.pkl")
     with open(results_path, "wb") as f:
         pickle.dump(results, f)
