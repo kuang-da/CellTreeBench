@@ -418,10 +418,11 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
         eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"])
         return eval_results
 
-def evaluate_base(dataset, dist_metric="euclidean", device="cpu"):
+def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None):
     base_eval = {
-            f"rf": [],
-            f"rf_max": []
+            "rf": [],
+            "rf_max": [],
+            "quartet_dist": []
             }
     for i, node_mtx_dict in enumerate(dataset.get_node_mtx()):
         # Reconstruct tree (to get base RF)
@@ -429,14 +430,28 @@ def evaluate_base(dataset, dist_metric="euclidean", device="cpu"):
             .unsqueeze(0)  # Add batch dimension
             .to(device))
         dm = pairwise_distances(mtx, metric=dist_metric)
-        dm = dm.squeeze(0).cpu().numpy()  # Shape: (N, N)
-        tree = reconstruct_from_dm(dm, node_mtx_dict["node_names"], method="nj")
+        dm = dm.squeeze(0).cpu()  # Shape: (N, N)
+        tree = reconstruct_from_dm(dm.numpy(), node_mtx_dict["node_names"], method="nj")
 
         # Compare with reference tree
         topo_res = dataset.compare_trees(tree, i, ref_tree="topology_tree")
         base_eval[f"rf"].append(topo_res["rf"])
         base_eval[f"rf_max"].append(topo_res["max_rf"])
+        
+        
+        # Generate quartets for evaluation
+        dm_ref = dataset.ref_dm[i].unsqueeze(0).to(device)
+        dm_quartets, dm_ref_quartets = generate_quartets_tensor(
+            batch_size=100000,  # Use many quartets for evaluation
+            dm=dm,
+            dm_ref=dm_ref,
+            device=device,
+            seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
+            )
+        quartet_dist = get_quartet_dist(dm_quartets, dm_ref_quartets)
+        base_eval[f"quartet_dist"].append(quartet_dist.item())
 
+    base_eval[f"quartet_dist"] = sum(base_eval[f"quartet_dist"])/len(base_eval[f"quartet_dist"])
     base_eval[f"rf"] = sum(base_eval[f"rf"])/sum(base_eval[f"rf_max"])
     return base_eval
 
@@ -460,7 +475,7 @@ def main():
         "push_margin": 0.05,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 2000,
+        "eval_interval": 1,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "manhattan",
@@ -495,10 +510,12 @@ def main():
     # out_dir=out_dir,
     #sampling_method="biological",
     #seed=42,
-    train_base_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device)
-    test_base_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device)
+    train_base_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen)
+    test_base_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen)
     logging.info(f"Base evaluation on train dataset: RF={train_base_eval['rf']:.4f}")
     logging.info(f"Base evaluation on test dataset: RF={test_base_eval['rf']:.4f}")
+    logging.info(f"Base evaluation on train dataset: Q-dist={train_base_eval['quartet_dist']:.4f}")
+    logging.info(f"Base evaluation on test dataset: Q-dist={test_base_eval['quartet_dist']:.4f}")
 
     logging.info(f"Train shape: {train_dataset.data_normalized[0].shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
@@ -554,6 +571,9 @@ def main():
                 )
     logging.info(f"Pre-training model evaluation on train dataset: RF={train_metrics['rf_train']:.4f}")
     logging.info(f"Pre-training model evaluation on test dataset: RF={test_metrics['rf_test']:.4f}")
+    logging.info(f"Pre-training model evaluation on train dataset: Q-dist={train_metrics['quartet_dist_train']:.4f}")
+    logging.info(f"Pre-training model evaluation on test dataset: Q-dist={test_metrics['quartet_dist_test']:.4f}")
+
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
 
