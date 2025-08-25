@@ -490,11 +490,11 @@ def main():
         # Training
         "lr": 0.0001,
         "weight_decay": 0.01,
-        "weight_D": 2,
+        "weight_D": 0.1,
         "weight_P": 20.0,
-        "weight_close": 2.0,
-        "weight_push": 20.0,
-        "push_margin": 0.05,
+        "weight_close": 1.0,
+        "weight_push": 30.0,
+        "push_margin": 0.1,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
         "eval_interval": 900,
@@ -504,6 +504,12 @@ def main():
         "metric_loss": "additivity",  # Can be "additivity", "triplet", or "quadruplet"
         # Device
         "device": "cuda:0" if torch.cuda.is_available() else "cpu",
+        "seed": 42,
+        "dataset_names": {"train":0.5, "test":0.5},
+        "tree_directory": "trees",
+        "msa_directory": "msas",
+        "autosplit": True
+
     }
 
     results = {
@@ -519,8 +525,8 @@ def main():
 
     device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
-    gen = torch.Generator().manual_seed(42)  # Set seed for reproducibility
-    torch.manual_seed(42)  # Set global seed for reproducibility
+    gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
+    torch.manual_seed(config["seed"])  # Set global seed for reproducibility
 
     # Load dataset
     logging.info(f"Loading {config['dataset_name']} dataset...")
@@ -530,16 +536,18 @@ def main():
     dataset_name=config["dataset_name"]
     datasets = PhyloDatasetCreator(
         dataset_name,
-        dataset_names={"train":0.5, "test":0.5},
+        dataset_names=config["dataset_names"],
         data_dir=data_dir,
-        tree_directory="trees",
-        msa_directory="msas",
-        autosplit=True,
-        seed=42
+        tree_directory=config["tree_directory"],
+        msa_directory=config["msa_directory"],
+        autosplit=config["autosplit"],
+        seed=torch.randint(0, 100_000_000_000, (1,), generator=gen).item()
     )
     datasets_dict = datasets.get_dataset(datasets=["train", "test"])
     train_dataset = datasets_dict["train"]
     test_dataset = datasets_dict["test"]
+    results["data"] = {name: [{"leaves": node_mtx["node_mtx"].shape[0], "amino_acids": node_mtx["node_mtx"].shape[1]/22} for node_mtx in dataset.get_node_mtx()] for name, dataset in datasets_dict.items()}
+    print(results["data"])
     # out_dir=out_dir,
     #sampling_method="biological",
     #seed=42,
