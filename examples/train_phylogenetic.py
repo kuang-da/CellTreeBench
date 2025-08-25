@@ -528,15 +528,15 @@ def main():
     
     
     random_evals = 2
-    for rand_eval in range(random_evals):
+    for _ in range(random_evals):
         train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
         test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
         logging.info(
                     f"Random evaluations: "
-                    f"Train RF: {train_base_eval['rf']:.4f} | "
-                    f"Test RF: {test_base_eval['rf']:.4f} | "
-                    f"Train Q-Dist: {train_base_eval['quartet_dist']:.4f} | "
-                    f"Test Q-Dist: {test_base_eval['quartet_dist']:.4f}"
+                    f"Train RF: {train_rand_eval['rf']:.4f} | "
+                    f"Test RF: {test_rand_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_rand_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_rand_eval['quartet_dist']:.4f}"
                 )
     # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
 
