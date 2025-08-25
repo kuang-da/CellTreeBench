@@ -218,28 +218,5 @@ class PhyloDatasetCreator():
     def _create_sub_tree(self, tree, leaves=None):
         tree = tree.copy()
         if leaves is not None:
-            tree.prune(leaves.tolist())
+            tree.prune(leaves.tolist(), preserve_branch_length=True)
         return tree
-
-def load_phylo_supervised_split(dataset_name=None, data_dir=DATA_ROOT, out_dir=None):
-    """Load phylogenetic dataset with precomputed train/test splits. Very simple method that does not split. It only loads separate datasets."""
-    
-    train_dataset= PhyloDataset(
-        dataset_name=os.path.join(dataset_name, "train"),
-        tree_directory="trees",
-        msa_directory="msas",
-        data_dir=data_dir
-    )
-    test_dataset = PhyloDataset(
-        dataset_name=os.path.join(dataset_name, "test"),
-        tree_directory="trees",
-        msa_directory="msas",
-        data_dir=data_dir
-        )
-    max_length = max(df.shape[1] for df in train_dataset.data + test_dataset.data)
-    train_dataset.create_data_normalized(max_length)
-    test_dataset.create_data_normalized(max_length)
-    train_dataset.create_ref_dm()
-    test_dataset.create_ref_dm()
-
-    return train_dataset, test_dataset

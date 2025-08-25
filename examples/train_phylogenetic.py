@@ -475,7 +475,7 @@ def main():
         "push_margin": 0.05,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 1,
+        "eval_interval": 2000,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "manhattan",

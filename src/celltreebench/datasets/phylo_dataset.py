@@ -98,6 +98,6 @@ class PhyloDataset(Dataset):
 
     def create_ref_dm(self):
         self.ref_dm = []  # List of reference distance matrices for each topology tree
-        for tree in self.topology_trees:
-            leave_names = [leaf.name for leaf in tree.iter_leaves()]
+        for i, tree in enumerate(self.topology_trees):
+            leave_names = self.data[i].index
             self.ref_dm.append(get_path_distance_matrix(tree, leave_names))
