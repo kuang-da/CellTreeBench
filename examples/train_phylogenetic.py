@@ -418,7 +418,20 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
         eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"])
         return eval_results
 
-def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, random=False):
+def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, random=None):
+    """
+    Evaluate the base model on a dataset.
+
+    Args:
+        dataset: The dataset to evaluate on.
+        dist_metric (str): Distance metric to use.
+        device (str): Device to run evaluation on.
+        gen: Random number generator.
+        random (str): Randomization strategy ("shuffle" or "embedding" None).
+
+    Returns:
+        dict: Dictionary containing evaluation metrics.
+    """
     base_eval = {
             "rf": [],
             "rf_max": [],
@@ -429,9 +442,15 @@ def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, rand
         mtx = (torch.tensor(node_mtx_dict["node_mtx"], dtype=torch.float)
             .unsqueeze(0)  # Add batch dimension
             .to(device))
-        if random:
+        if random == "shuffle":
             rand_idx = torch.randperm(mtx.size(1), generator=gen)
             mtx = mtx[:, rand_idx, :]
+        elif random == "embedding":
+            rand_emb = torch.randn(mtx.size(2), 16, generator=gen)  # Random embedding
+            mtx = mtx @ rand_emb.to(device)
+        elif random is not None:
+            raise ValueError(f"Invalid randomization strategy: {random}")
+        
         dm = pairwise_distances(mtx, metric=dist_metric)
         dm = dm.squeeze(0).cpu()  # Shape: (N, N)
         tree = reconstruct_from_dm(dm.numpy(), node_mtx_dict["node_names"], method="nj")
@@ -465,7 +484,7 @@ def main():
     # Configuration
     config = {
         # Dataset
-        "dataset_name": "phylogenetic",
+        "dataset_name": "phylogenetic/small",
         "lineage_name": None,
         "base_dir": "/workspaces/CellTreeBench",
         # Training
@@ -527,17 +546,28 @@ def main():
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
     
     
-    random_evals = 2
-    for _ in range(random_evals):
-        train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
-        test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
+    base_evals = 4
+    for _ in range(base_evals):
+        train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
+        test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
+        train_rand_embedding_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="embedding")
+        test_rand_embedding_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random="embedding")
         logging.info(
-                    f"Random evaluations: "
+                    f"Random embedding evaluations: "
+                    f"Train RF: {train_rand_embedding_eval['rf']:.4f} | "
+                    f"Test RF: {test_rand_embedding_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_rand_embedding_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_rand_embedding_eval['quartet_dist']:.4f}"
+                )
+        logging.info(
+                    f"Random shuffle evaluations: "
                     f"Train RF: {train_rand_eval['rf']:.4f} | "
                     f"Test RF: {test_rand_eval['rf']:.4f} | "
                     f"Train Q-Dist: {train_rand_eval['quartet_dist']:.4f} | "
                     f"Test Q-Dist: {test_rand_eval['quartet_dist']:.4f}"
                 )
+        
+    
     # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
 
     # Get input dimension

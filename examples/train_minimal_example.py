@@ -351,12 +351,20 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train"):
             f"quartet_dist_{dataset_name}": quartet_dist.item(),
         }
 
-def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None):
+def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, random=None):
     base_eval= {}
     # Reconstruct tree (to get base RF)
     mtx = (torch.tensor(dataset.get_node_mtx()["node_mtx"], dtype=torch.float)
         .unsqueeze(0)  # Add batch dimension
         .to(device))
+    if random == "shuffle":
+        rand_idx = torch.randperm(mtx.size(1), generator=gen)
+        mtx = mtx[:, rand_idx, :]
+    elif random == "embedding":
+        rand_emb = torch.randn(mtx.size(2), 16, generator=gen)  # Random embedding
+        mtx = mtx @ rand_emb.to(device)
+    elif random is not None:
+        raise ValueError(f"Invalid randomization strategy: {random}")
     dm = pairwise_distances(mtx, metric=dist_metric)
     dm = dm.squeeze(0).cpu()  # Shape: (N, N)
     tree = reconstruct_from_dm(dm.numpy(), dataset.get_node_mtx()["node_names"], method="nj")
@@ -437,6 +445,29 @@ def main():
     logging.info(f"Test shape: {test_dataset.data_normalized.shape}")
     logging.info(f"Number of leaves: {train_dataset.n_leaves}")
 
+    base_evals = 4
+    for _ in range(base_evals):
+        train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, random="shuffle")
+        test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, random="shuffle")
+
+        train_rand_embedding_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, random="embedding")
+        test_rand_embedding_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, random="embedding")
+
+        logging.info(
+                    f"Random embedding evaluations: "
+                    f"Train RF: {train_rand_embedding_eval['rf']:.4f} | "
+                    f"Test RF: {test_rand_embedding_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_rand_embedding_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_rand_embedding_eval['quartet_dist']:.4f}"
+                )
+        logging.info(
+                    f"Random shuffle evaluations: "
+                    f"Train RF: {train_rand_eval['rf']:.4f} | "
+                    f"Test RF: {test_rand_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_rand_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_rand_eval['quartet_dist']:.4f}"
+                )
+        
     # Get input dimension
     input_dim = train_dataset.data_normalized.shape[1]
     logging.info(f"Input dimension: {input_dim}")
