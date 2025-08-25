@@ -490,14 +490,14 @@ def main():
         # Training
         "lr": 0.0001,
         "weight_decay": 0.01,
-        "weight_D": 0.1,
+        "weight_D": 2,
         "weight_P": 20.0,
-        "weight_close": 1.0,
-        "weight_push": 30.0,
-        "push_margin": 0.1,
+        "weight_close": 2.0,
+        "weight_push": 20.0,
+        "push_margin": 0.05,
         "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 200,
+        "eval_interval": 900,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "manhattan",
@@ -690,8 +690,12 @@ def main():
 
     # Save final results
     import pickle
+    from datetime import datetime
+
     results["total_time"] = total_time
-    results_path = os.path.join(out_dir, "training_results.pkl")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    results_path = os.path.join(out_dir, f"training_results_{now}.pkl")
     with open(results_path, "wb") as f:
         pickle.dump(results, f)
     logging.info(f"Results saved to {results_path}")
