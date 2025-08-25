@@ -351,6 +351,33 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train"):
             f"quartet_dist_{dataset_name}": quartet_dist.item(),
         }
 
+def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None):
+    base_eval= {}
+    # Reconstruct tree (to get base RF)
+    mtx = (torch.tensor(dataset.get_node_mtx()["node_mtx"], dtype=torch.float)
+        .unsqueeze(0)  # Add batch dimension
+        .to(device))
+    dm = pairwise_distances(mtx, metric=dist_metric)
+    dm = dm.squeeze(0).cpu()  # Shape: (N, N)
+    tree = reconstruct_from_dm(dm.numpy(), dataset.get_node_mtx()["node_names"], method="nj")
+
+    # Compare with reference tree
+    topo_res = dataset.compare_trees(tree, ref_tree="topology_tree")
+    base_eval["rf"] =topo_res["relative_rf"]
+        
+        
+    # Generate quartets for evaluation
+    dm_ref = dataset.ref_dm.unsqueeze(0).to(device)
+    dm_quartets, dm_ref_quartets = generate_quartets_tensor(
+        batch_size=100000,  # Use many quartets for evaluation
+        dm=dm,
+        dm_ref=dm_ref,
+        device=device,
+        seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
+        )
+    quartet_dist = get_quartet_dist(dm_quartets, dm_ref_quartets)
+    base_eval[f"quartet_dist"] = quartet_dist.item()
+    return base_eval
 
 def main():
     """Main training function."""
@@ -399,6 +426,12 @@ def main():
         sampling_method="biological",
         seed=42,
     )
+    train_base_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device)
+    test_base_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device)
+    logging.info(f"Base evaluation on train dataset: RF={train_base_eval['rf']:.4f}")
+    logging.info(f"Base evaluation on test dataset: RF={test_base_eval['rf']:.4f}")
+    logging.info(f"Base evaluation on train dataset: Q-dist={train_base_eval['quartet_dist']:.4f}")
+    logging.info(f"Base evaluation on test dataset: Q-dist={test_base_eval['quartet_dist']:.4f}")
 
     logging.info(f"Train shape: {train_dataset.data_normalized.shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized.shape}")
@@ -445,7 +478,16 @@ def main():
     }
 
     start_time = time.time()
-
+    train_metrics = evaluate_model(
+                    model, train_dataset, config, device, "train"
+                )
+    test_metrics = evaluate_model(
+                    model, test_dataset, config, device, "test"
+                )
+    logging.info(f"Pre-training model evaluation on train dataset: RF={train_metrics['rf_train']:.4f}")
+    logging.info(f"Pre-training model evaluation on test dataset: RF={test_metrics['rf_test']:.4f}")
+    logging.info(f"Pre-training model evaluation on train dataset: Q-dist={train_metrics['quartet_dist_train']:.4f}")
+    logging.info(f"Pre-training model evaluation on test dataset: Q-dist={test_metrics['quartet_dist_test']:.4f}")
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
 

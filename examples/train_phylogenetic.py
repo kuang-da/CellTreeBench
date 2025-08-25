@@ -418,7 +418,7 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
         eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"])
         return eval_results
 
-def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None):
+def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, random=False):
     base_eval = {
             "rf": [],
             "rf_max": [],
@@ -429,6 +429,9 @@ def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None):
         mtx = (torch.tensor(node_mtx_dict["node_mtx"], dtype=torch.float)
             .unsqueeze(0)  # Add batch dimension
             .to(device))
+        if random:
+            rand_idx = torch.randperm(mtx.size(1), generator=gen)
+            mtx = mtx[:, rand_idx, :]
         dm = pairwise_distances(mtx, metric=dist_metric)
         dm = dm.squeeze(0).cpu()  # Shape: (N, N)
         tree = reconstruct_from_dm(dm.numpy(), node_mtx_dict["node_names"], method="nj")
@@ -512,13 +515,29 @@ def main():
     #seed=42,
     train_base_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen)
     test_base_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen)
-    logging.info(f"Base evaluation on train dataset: RF={train_base_eval['rf']:.4f}")
-    logging.info(f"Base evaluation on test dataset: RF={test_base_eval['rf']:.4f}")
-    logging.info(f"Base evaluation on train dataset: Q-dist={train_base_eval['quartet_dist']:.4f}")
-    logging.info(f"Base evaluation on test dataset: Q-dist={test_base_eval['quartet_dist']:.4f}")
-
+    logging.info(
+                    f"Base evaluations: "
+                    f"Train RF: {train_base_eval['rf']:.4f} | "
+                    f"Test RF: {test_base_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_base_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_base_eval['quartet_dist']:.4f}"
+                )
+    
     logging.info(f"Train shape: {train_dataset.data_normalized[0].shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
+    
+    
+    random_evals = 2
+    for rand_eval in range(random_evals):
+        train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
+        test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random=True)
+        logging.info(
+                    f"Random evaluations: "
+                    f"Train RF: {train_base_eval['rf']:.4f} | "
+                    f"Test RF: {test_base_eval['rf']:.4f} | "
+                    f"Train Q-Dist: {train_base_eval['quartet_dist']:.4f} | "
+                    f"Test Q-Dist: {test_base_eval['quartet_dist']:.4f}"
+                )
     # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
 
     # Get input dimension
@@ -569,11 +588,13 @@ def main():
     test_metrics = evaluate_model(
                     model, test_dataset, config, device, "test", gen=gen
                 )
-    logging.info(f"Pre-training model evaluation on train dataset: RF={train_metrics['rf_train']:.4f}")
-    logging.info(f"Pre-training model evaluation on test dataset: RF={test_metrics['rf_test']:.4f}")
-    logging.info(f"Pre-training model evaluation on train dataset: Q-dist={train_metrics['quartet_dist_train']:.4f}")
-    logging.info(f"Pre-training model evaluation on test dataset: Q-dist={test_metrics['quartet_dist_test']:.4f}")
-
+    logging.info(
+                    f"Pre-training evaluations: "
+                    f"Train RF: {train_metrics['rf_train']:.4f} | "
+                    f"Test RF: {test_metrics['rf_test']:.4f} | "
+                    f"Train Q-Dist: {train_metrics['quartet_dist_train']:.4f} | "
+                    f"Test Q-Dist: {test_metrics['quartet_dist_test']:.4f}"
+                )
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
 
