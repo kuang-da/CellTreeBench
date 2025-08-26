@@ -11,3 +11,5 @@ examples/supervised_training.ipynb
 src/celltreebench/curation
 data
 __pycache__
+*.json
+*.png

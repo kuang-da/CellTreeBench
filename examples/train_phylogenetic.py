@@ -204,6 +204,8 @@ def train_one_epoch(
         batch_P = 0
         batch_P_close = 0
         batch_P_push = 0
+
+        # Process each tree's quartet
         for i, count in enumerate(counts):
             # Always process the FULL dataset (same pts_mtx every step) (for each tree)
             trans_pts_mtx = model(pts_mtx[i])
@@ -264,6 +266,7 @@ def train_one_epoch(
                     batch_P_push += count * torch.tensor(0.0, device=device)
                 else:
                     raise ValueError(f"Invalid metric loss: {metric_loss_type}")
+        
         # multiplied by count inside of loop to ensure that each metric is represennted based on how manny quartets from that tree are used then we average here:
         batch_P /=sum(counts)
         batch_P_close /= sum(counts)
@@ -366,6 +369,7 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
         config (dict): Configuration dictionary.
         device (str): Device for computation.
         dataset_name (str): Name of the dataset for logging.
+        gen (torch.Generator): Random number generator.
 
     Returns:
         list: List of
@@ -414,68 +418,102 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
             eval_results[f"rf_max_{dataset_name}"].append(emb_topo_res["max_rf"])
             eval_results[f"quartet_dist_{dataset_name}"].append(quartet_dist.item())
 
-        eval_results[f"rf_{dataset_name}"] = sum(eval_results[f"rf_{dataset_name}"])/sum(eval_results[f"rf_max_{dataset_name}"])
-        eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"])
+        eval_results[f"rf_{dataset_name}"] = sum(eval_results[f"rf_{dataset_name}"])/sum(eval_results[f"rf_max_{dataset_name}"]) # average between trees
+        eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"]) # average between trees
         return eval_results
 
-def evaluate_base(dataset, dist_metric="euclidean", device="cpu", gen=None, random=None):
+def evaluate_base(datasets, evals=1, dist_metric="euclidean", device="cpu", gen=None, eval_type="basic NJ"):
     """
     Evaluate the base model on a dataset.
 
     Args:
-        dataset: The dataset to evaluate on.
+        datasets (dict): The datasets to evaluate on. ("name": PhyloDataset)
+        evals (int): Number of evaluations to perform.
         dist_metric (str): Distance metric to use.
         device (str): Device to run evaluation on.
-        gen: Random number generator.
-        random (str): Randomization strategy ("shuffle" or "embedding" None).
+        gen (torch.Generator): Random number generator.
+        eval_type (str): Randomization strategy ("shuffle" or "embedding" or "basic NJ").
 
     Returns:
-        dict: Dictionary containing evaluation metrics.
+        tuple: (List of evaluations, Dictionary containing average evaluation metrics among evals)
     """
-    base_eval = {
-            "rf": [],
-            "rf_max": [],
-            "quartet_dist": []
+    base_eval = []
+    base_eval_avg = {}
+    for dataset_name in datasets.keys(): # create average dict
+        base_eval_avg |= {
+            f"quartet_dist_{dataset_name}": 0,
+            f"rf_{dataset_name}": 0
             }
-    for i, node_mtx_dict in enumerate(dataset.get_node_mtx()):
-        # Reconstruct tree (to get base RF)
-        mtx = (torch.tensor(node_mtx_dict["node_mtx"], dtype=torch.float)
-            .unsqueeze(0)  # Add batch dimension
-            .to(device))
-        if random == "shuffle":
-            rand_idx = torch.randperm(mtx.size(1), generator=gen)
-            mtx = mtx[:, rand_idx, :]
-        elif random == "embedding":
-            rand_emb = torch.randn(mtx.size(2), 16, generator=gen)  # Random embedding
-            mtx = mtx @ rand_emb.to(device)
-        elif random is not None:
-            raise ValueError(f"Invalid randomization strategy: {random}")
-        
-        dm = pairwise_distances(mtx, metric=dist_metric)
-        dm = dm.squeeze(0).cpu()  # Shape: (N, N)
-        tree = reconstruct_from_dm(dm.numpy(), node_mtx_dict["node_names"], method="nj")
 
-        # Compare with reference tree
-        topo_res = dataset.compare_trees(tree, i, ref_tree="topology_tree")
-        base_eval[f"rf"].append(topo_res["rf"])
-        base_eval[f"rf_max"].append(topo_res["max_rf"])
+    for eval_num in range(evals):
         
+        dataset_eval = {}
         
-        # Generate quartets for evaluation
-        dm_ref = dataset.ref_dm[i].unsqueeze(0).to(device)
-        dm_quartets, dm_ref_quartets = generate_quartets_tensor(
-            batch_size=100000,  # Use many quartets for evaluation
-            dm=dm,
-            dm_ref=dm_ref,
-            device=device,
-            seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
-            )
-        quartet_dist = get_quartet_dist(dm_quartets, dm_ref_quartets)
-        base_eval[f"quartet_dist"].append(quartet_dist.item())
+        for dataset_name, dataset in datasets.items():
 
-    base_eval[f"quartet_dist"] = sum(base_eval[f"quartet_dist"])/len(base_eval[f"quartet_dist"])
-    base_eval[f"rf"] = sum(base_eval[f"rf"])/sum(base_eval[f"rf_max"])
-    return base_eval
+            topo_eval = {
+                    "rf": [],
+                    "rf_max": [],
+                    "quartet_dist": []
+                    }
+            for i, node_mtx_dict in enumerate(dataset.get_node_mtx()): # for each tree
+                # Reconstruct tree (to get base RF)
+                mtx = (torch.tensor(node_mtx_dict["node_mtx"], dtype=torch.float)
+                    .unsqueeze(0)  # Add batch dimension
+                    .to(device))
+                
+                if eval_type == "shuffle":
+                    rand_idx = torch.randperm(mtx.size(1), generator=gen)
+                    mtx = mtx[:, rand_idx, :]
+                elif eval_type == "embedding":
+                    rand_emb = torch.randn(mtx.size(2), 16, generator=gen)  # Random embedding
+                    mtx = mtx @ rand_emb.to(device)
+                elif eval_type != "basic NJ":
+                    raise ValueError(f"Invalid randomization strategy: {eval_type}")
+                
+                dm = pairwise_distances(mtx, metric=dist_metric)
+                dm = dm.squeeze(0).cpu()  # Shape: (N, N)
+                tree = reconstruct_from_dm(dm.numpy(), node_mtx_dict["node_names"], method="nj")
+
+                # Compare with reference tree
+                topo_res = dataset.compare_trees(tree, i, ref_tree="topology_tree")
+                topo_eval[f"rf"].append(topo_res["rf"])
+                topo_eval[f"rf_max"].append(topo_res["max_rf"])
+                
+                
+                # Generate quartets for evaluation
+                dm_ref = dataset.ref_dm[i].unsqueeze(0).to(device)
+                dm_quartets, dm_ref_quartets = generate_quartets_tensor(
+                    batch_size=100000,  # Use many quartets for evaluation
+                    dm=dm,
+                    dm_ref=dm_ref,
+                    device=device,
+                    seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen))
+                    )
+                quartet_dist = get_quartet_dist(dm_quartets, dm_ref_quartets)
+                topo_eval[f"quartet_dist"].append(quartet_dist.item())
+
+            q_dist = sum(topo_eval["quartet_dist"])/len(topo_eval["quartet_dist"]) # Average of Q-dist among trees
+            rf_dist = sum(topo_eval["rf"])/sum(topo_eval["rf_max"]) # Average of RF dist among trees
+            dataset_eval[f"quartet_dist_{dataset_name}"] = q_dist
+            dataset_eval[f"rf_{dataset_name}"] = rf_dist
+
+            base_eval_avg[f"quartet_dist_{dataset_name}"] += q_dist
+            base_eval_avg[f"rf_{dataset_name}"] += rf_dist
+
+        dataset_eval["eval_type"] = eval_type # "shuffle" or "embedding" or "basic NJ"
+        dataset_eval["eval_num"] = eval_num # num of times evaluated
+        base_eval.append(dataset_eval)
+    
+    for dataset_name in datasets.keys():
+        base_eval_avg[f"quartet_dist_{dataset_name}"] /= evals
+        base_eval_avg[f"rf_{dataset_name}"] /= evals
+
+    base_eval_avg["eval_type"] = eval_type
+    base_eval_avg["evals"] = evals
+    
+
+    return base_eval, base_eval_avg
 
 def main():
     """Main training function."""
@@ -483,8 +521,14 @@ def main():
     logging.info("Starting CellTreeQMAttention training on Phylogenetic dataset")
     # Configuration
     config = {
+        # Random Seed
+        "seed": 42,
         # Dataset
-        "dataset_name": "phylogenetic/complicated_100",
+        "dataset_name": "phylogenetic/cellreg_100tips", # where to find data (parent directory of both train and test if using pre-split data)
+        "dataset_names": {"train":0.5, "test":0.5}, #datasets to generate. Also can include split proportions if autosplit is enabled (but be careful because uneven splits may cause zero padding)
+        "tree_directory": "trees", # where to find trees (within dataset directory)
+        "msa_directory": "msas", # where to find MSAs (within dataset directory)
+        "autosplit": True, # Autosplit the data into datasets (if disabled each dataset name will be assumed to be a directory)
         "lineage_name": None,
         "base_dir": "/workspaces/CellTreeBench",
         # Training
@@ -496,7 +540,7 @@ def main():
         "weight_push": 1,
         "push_margin": 0.2,
         "batch_size": 512,  # Reduced from 2048 for high-dimensional data
-        "num_epochs": 60,
+        "num_epochs": 5,
         "eval_interval": 100,
         "weight_gate": -1.0,  # Disabled
         # Model
@@ -504,36 +548,32 @@ def main():
         "metric_loss": "additivity",  # Can be "additivity", "triplet", or "quadruplet"
         # Device
         "device": "cuda:0" if torch.cuda.is_available() else "cpu",
-        "seed": 42,
-        "dataset_names": {"train":0.5, "test":0.5},
-        "tree_directory": "trees",
-        "msa_directory": "msas",
-        "autosplit": True
+        
 
     }
 
     results = {
         "epoch_avg_loss": [],
         "all_evaluations": [],  # Store all evaluation results from all epochs
-        "base_eval": { # store base evaluations (NOTE: formatted differently than all_evaluations)
-            "nj": {},
-            "random_embedding": [],
-            "random_shuffle": [] 
-        },
+        "base_eval_avg": {}, # store average base evaluations (NOTE: formatted differently than all_evaluations)
         "config": config # store config for later reference
     }
 
     device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
-    gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
-    torch.manual_seed(config["seed"])  # Set global seed for reproducibility
+    # gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
+    # torch.manual_seed(config["seed"])  # Set global seed for reproducibility
+    gen = None
 
     # Load dataset
     logging.info(f"Loading {config['dataset_name']} dataset...")
     data_dir = f"{config['base_dir']}/data/"
     out_dir = f"{config['base_dir']}/examples/out/phylogenetic_{config['dataset_name']}"
+
     os.makedirs(out_dir, exist_ok=True)
+
     dataset_name=config["dataset_name"]
+
     datasets = PhyloDatasetCreator(
         dataset_name,
         dataset_names=config["dataset_names"],
@@ -546,62 +586,54 @@ def main():
     datasets_dict = datasets.get_dataset(datasets=["train", "test"])
     train_dataset = datasets_dict["train"]
     test_dataset = datasets_dict["test"]
+
+    # Get amino acid and leaf count of each tree for each dataset
     results["data"] = {name: [{"leaves": node_mtx["node_mtx"].shape[0], "amino_acids": node_mtx["node_mtx"].shape[1]/22} for node_mtx in dataset.get_node_mtx()] for name, dataset in datasets_dict.items()}
-    # out_dir=out_dir,
-    #sampling_method="biological",
-    #seed=42,
-    train_base_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen)
-    test_base_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen)
+    
+    # Evaluate the datasets on basic NJ
+    _, avg_NJ_evals = evaluate_base(datasets_dict, evals=1, dist_metric=config["metric"], device=device, gen=gen, eval_type="basic NJ")
+
     logging.info(
                     f"Base evaluations: "
-                    f"Train RF: {train_base_eval['rf']:.4f} | "
-                    f"Test RF: {test_base_eval['rf']:.4f} | "
-                    f"Train Q-Dist: {train_base_eval['quartet_dist']:.4f} | "
-                    f"Test Q-Dist: {test_base_eval['quartet_dist']:.4f}"
+                    f"Train RF: {avg_NJ_evals['rf_train']:.4f} | "
+                    f"Test RF: {avg_NJ_evals['rf_test']:.4f} | "
+                    f"Train Q-Dist: {avg_NJ_evals['quartet_dist_train']:.4f} | "
+                    f"Test Q-Dist: {avg_NJ_evals['quartet_dist_test']:.4f}"
                 )
-    results["base_eval"]["nj"] = {
-        "train": train_base_eval,
-        "test": test_base_eval
-    }
+    
+    results["base_eval_avg"]["NJ"]= avg_NJ_evals # append basic NJ evaluation to final results dict
+
     logging.info(f"Train shape: {train_dataset.data_normalized[0].shape}")
     logging.info(f"Test shape: {test_dataset.data_normalized[0].shape}")
     
-    base_evals = 4
-    for eval_num in range(base_evals):
-        train_rand_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
-        test_rand_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random="shuffle")
-        train_rand_embedding_eval = evaluate_base(train_dataset, dist_metric=config["metric"], device=device, gen=gen, random="embedding")
-        test_rand_embedding_eval = evaluate_base(test_dataset, dist_metric=config["metric"], device=device, gen=gen, random="embedding")
-        logging.info(
-                    f"Random embedding evaluations: "
-                    f"Train RF: {train_rand_embedding_eval['rf']:.4f} | "
-                    f"Test RF: {test_rand_embedding_eval['rf']:.4f} | "
-                    f"Train Q-Dist: {train_rand_embedding_eval['quartet_dist']:.4f} | "
-                    f"Test Q-Dist: {test_rand_embedding_eval['quartet_dist']:.4f}"
-                )
-        logging.info(
-                    f"Random shuffle evaluations: "
-                    f"Train RF: {train_rand_eval['rf']:.4f} | "
-                    f"Test RF: {test_rand_eval['rf']:.4f} | "
-                    f"Train Q-Dist: {train_rand_eval['quartet_dist']:.4f} | "
-                    f"Test Q-Dist: {test_rand_eval['quartet_dist']:.4f}"
-                )
-        results["base_eval"]["random_embedding"].append({
-            "train": train_rand_embedding_eval,
-            "test": test_rand_embedding_eval,
-            "eval": eval_num
-        })
-        results["base_eval"]["random_shuffle"].append({
-            "train": train_rand_eval,
-            "test": test_rand_eval,
-            "eval": eval_num
-        })
-        
+
+    # Evaluate the datasets on random shuffle and embedding
+    _, avg_random_shuffled_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["metric"], device=device, gen=gen, eval_type="shuffle")
+    _, avg_random_embedding_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["metric"], device=device, gen=gen, eval_type="embedding")
+
+    # Log averages of random shuffle and random embedding evaluations
+    logging.info(
+                f"Random embedding evaluations: "
+                f"Train RF: {avg_random_embedding_evals['rf_train']:.4f} | "
+                f"Test RF: {avg_random_embedding_evals['rf_test']:.4f} | "
+                f"Train Q-Dist: {avg_random_embedding_evals['quartet_dist_train']:.4f} | "
+                f"Test Q-Dist: {avg_random_embedding_evals['quartet_dist_test']:.4f}"
+            )
+    logging.info(
+                f"Random shuffle evaluations: "
+                f"Train RF: {avg_random_shuffled_evals['rf_train']:.4f} | "
+                f"Test RF: {avg_random_shuffled_evals['rf_test']:.4f} | "
+                f"Train Q-Dist: {avg_random_shuffled_evals['quartet_dist_train']:.4f} | "
+                f"Test Q-Dist: {avg_random_shuffled_evals['quartet_dist_test']:.4f}"
+            )
+    
+    # Save averages of random shuffle and random embedding evaluations
+    results["base_eval_avg"]["random_embedding"] = avg_random_embedding_evals
+    results["base_eval_avg"]["random_shuffle"] = avg_random_shuffled_evals
         
     
-    # logging.info(f"Number of leaves: {train_dataset.n_leaves}")
-
     # Get input dimension
+    assert len({df.shape[1] for df in train_dataset.data_normalized + test_dataset.data_normalized}) == 1, "Inconsistent input dimensions in data" # Ensure all data has same number of dimensions
     input_dim = train_dataset.data_normalized[0].shape[1]
 
     logging.info(f"Input dimension: {input_dim}")
@@ -632,13 +664,8 @@ def main():
         model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
     )
 
-    # Training loop
-    logging.info("Starting training...")
-    best_rf = float("inf")
-    best_epoch = 0
-    best_step = 0
 
-    start_time = time.time()
+    # Evaluate the model pre-traininng
     train_metrics = evaluate_model(
                     model, train_dataset, config, device, "train", gen=gen
                 )
@@ -652,6 +679,18 @@ def main():
                     f"Train Q-Dist: {train_metrics['quartet_dist_train']:.4f} | "
                     f"Test Q-Dist: {test_metrics['quartet_dist_test']:.4f}"
                 )
+    results["base_eval_avg"]["pre-training"] = train_metrics | test_metrics
+
+
+    # Training loop
+    logging.info("Starting training...")
+    best_rf = float("inf")
+    best_epoch = 0
+    best_step = 0
+
+    start_time = time.time()
+
+    
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
 
@@ -699,10 +738,10 @@ def main():
     import pickle
     from datetime import datetime
 
-    results["total_time"] = total_time
+    results["total_time"] = total_time # save how long the model took to run
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
-    results_path = os.path.join(out_dir, f"training_results_{now}.pkl")
+    results_path = os.path.join(out_dir, f"training_results_{now}.pkl") # filename based on date/time
     with open(results_path, "wb") as f:
         pickle.dump(results, f)
     logging.info(f"Results saved to {results_path}")
@@ -725,8 +764,8 @@ def main():
     if final_eval:
         print(f"Final train RF: {final_eval['train_rf']:.4f}")
         print(f"Final test RF: {final_eval['test_rf']:.4f}")
-        # print(f"Final train Q-dist: {final_eval['train_quartet_dist']:.4f}")
-        # print(f"Final test Q-dist: {final_eval['test_quartet_dist']:.4f}")
+        print(f"Final train Q-dist: {final_eval['train_quartet_dist']:.4f}")
+        print(f"Final test Q-dist: {final_eval['test_quartet_dist']:.4f}")
     print(f"Training time: {total_time:.2f}s")
     print("=" * 60)
 

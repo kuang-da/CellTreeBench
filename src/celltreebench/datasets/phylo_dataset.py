@@ -20,16 +20,21 @@ logger = logging.getLogger(__name__)
 
 class PhyloDataset(Dataset):
     """
-    Class for phylogenetic datasets.
+    Class for the phylogenetic dataset.
     """
-    def __init__(self, msas, trees, max_length=0):
+    def __init__(self, msas, trees, name=None, max_length=None):
         """
         Initialize the PhyloDataset.
 
         Args:
-            msas (list): List of DataFrames containing the MSA data.
+            msas (list): List of pd DataFrames containing the MSA data.
             trees (list): List of ETE3 Tree objects representing the phylogenetic trees.
+            name (str): Name of the dataset.
+            max_length (int): Maximum length of the MSA sequences.
         """
+        if max_length is None: # if not given a max length, find the max length in this dataset and use that
+            max_length = max(df.shape[1] for df in msas)
+        self.name = name
         self.data = msas
         self.data_normalized = self._zero_pad(self.data, max_length) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
         self.topology_trees = trees
@@ -37,12 +42,15 @@ class PhyloDataset(Dataset):
 
     def get_proportions(self):
         """
-        Returns the proportions of each tree (based on number of leaves) in the dataset.
+        Returns the proportions of each tree (based on number of quartets) in the dataset.
 
         """
         return [comb(len(tree.get_leaves()), 4) for tree in self.topology_trees]
     
     def __len__(self):
+        """
+        Returns the total number of quartets in the dataset.
+        """
         return sum(self.get_proportions())
     
     def _zero_pad(self, data, max_length):
@@ -51,7 +59,8 @@ class PhyloDataset(Dataset):
         
         Args:
             data (list): List of DataFrames containing the MSA data.
-        
+            max_length (int): Maximum length of the MSA sequences (how many columns to pad to).
+
         Returns:
             list: List of DataFrames with zero padding applied.
         """
@@ -68,8 +77,9 @@ class PhyloDataset(Dataset):
         Returns a dictionary containing the node matrix and node names.
 
         Returns:
-            dict: A dictionary with 'node_mtx' as a NumPy array of the normalized data
-            and 'node_names' as the corresponding index.
+            List: A list of dictionnaries for each MSA/tree
+                dict: A dictionary with 'node_mtx' as a NumPy array of the normalized data 
+                and 'node_names' as the corresponding index.
         """
         return [{
             "node_mtx": data.to_numpy(),
@@ -82,6 +92,7 @@ class PhyloDataset(Dataset):
 
         Args:
             tree1 (Tree): The tree to compare.
+            i (int): Index of the topology tree to compare against.
             ref_tree (str): The name of the reference tree, default is 'topology_tree'.
             unrooted (bool): Whether to compare the trees as unrooted. Default is True.
 
@@ -90,7 +101,7 @@ class PhyloDataset(Dataset):
         """
         logger.debug(f"Comparing trees with reference to {ref_tree}")
         if ref_tree == "topology_tree":
-            tree2 = self.topology_trees[i]
+            tree2 = self.topology_trees[i] # get which topology tree to use as reference tree
         else:
             raise ValueError("Unknown reference tree specified.")
 
@@ -98,6 +109,6 @@ class PhyloDataset(Dataset):
 
     def create_ref_dm(self):
         self.ref_dm = []  # List of reference distance matrices for each topology tree
-        for i, tree in enumerate(self.topology_trees):
-            leave_names = self.data[i].index
+        for i, tree in enumerate(self.topology_trees): # for all trees
+            leave_names = self.data[i].index # use MSA leaves because they are in the correct order (the tree leaves may not be due to reordering when pruninng)
             self.ref_dm.append(get_path_distance_matrix(tree, leave_names))
