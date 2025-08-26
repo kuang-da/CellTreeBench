@@ -533,15 +533,15 @@ def main():
         "base_dir": "/workspaces/CellTreeBench",
         # Training
         "lr": 0.0001,
-        "weight_decay": 0.001,
-        "weight_D": 6.0,
-        "weight_P": 4.0,
-        "weight_close": 0.5,
-        "weight_push": 1,
-        "push_margin": 0.2,
-        "batch_size": 512,  # Reduced from 2048 for high-dimensional data
-        "num_epochs": 5,
-        "eval_interval": 100,
+        "weight_decay": 0.01,
+        "weight_D": 0.1,
+        "weight_P": 20.0,
+        "weight_close": 1.0,
+        "weight_push": 30.0,
+        "push_margin": 0.1,
+        "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
+        "num_epochs": 60,
+        "eval_interval": 2000,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
