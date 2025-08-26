@@ -484,23 +484,23 @@ def main():
     # Configuration
     config = {
         # Dataset
-        "dataset_name": "phylogenetic/complicated",
+        "dataset_name": "phylogenetic/complicated_100",
         "lineage_name": None,
         "base_dir": "/workspaces/CellTreeBench",
         # Training
         "lr": 0.0001,
-        "weight_decay": 0.01,
-        "weight_D": 0.1,
-        "weight_P": 20.0,
-        "weight_close": 1.0,
-        "weight_push": 30.0,
-        "push_margin": 0.1,
-        "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
+        "weight_decay": 0.001,
+        "weight_D": 6.0,
+        "weight_P": 4.0,
+        "weight_close": 0.5,
+        "weight_push": 1,
+        "push_margin": 0.2,
+        "batch_size": 512,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 900,
+        "eval_interval": 100,
         "weight_gate": -1.0,  # Disabled
         # Model
-        "metric": "manhattan",
+        "metric": "euclidean",
         "metric_loss": "additivity",  # Can be "additivity", "triplet", or "quadruplet"
         # Device
         "device": "cuda:0" if torch.cuda.is_available() else "cpu",
@@ -547,7 +547,6 @@ def main():
     train_dataset = datasets_dict["train"]
     test_dataset = datasets_dict["test"]
     results["data"] = {name: [{"leaves": node_mtx["node_mtx"].shape[0], "amino_acids": node_mtx["node_mtx"].shape[1]/22} for node_mtx in dataset.get_node_mtx()] for name, dataset in datasets_dict.items()}
-    print(results["data"])
     # out_dir=out_dir,
     #sampling_method="biological",
     #seed=42,
