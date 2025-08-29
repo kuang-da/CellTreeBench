@@ -1,14 +1,9 @@
 import logging
 import os
 from ete3 import Tree
-from Bio import SeqIO
 import pandas as pd
-from math import comb
-import torch
 import numpy as np
 
-from celltreebench.utils.tree_operations import get_path_distance_matrix
-from celltreebench.utils.reconstruction_eval import compare_trees
 from celltreebench.datasets.phylo_dataset import PhyloDataset
 
 

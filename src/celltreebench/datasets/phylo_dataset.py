@@ -5,7 +5,7 @@ import pandas as pd
 from math import comb
 
 from celltreebench.utils.tree_operations import get_path_distance_matrix
-from celltreebench.utils.reconstruction_eval import compare_trees
+# from celltreebench.utils.reconstruction_eval import compare_trees
 
 
 
@@ -97,15 +97,60 @@ class PhyloDataset(Dataset):
             unrooted (bool): Whether to compare the trees as unrooted. Default is True.
 
         Returns:
-            float: A similarity score between the two trees.
+            dict: Dictionary of of RF info and edge info about two trees
+             - RF (float): The Robinson-Foulds distance between the two trees.
+             - relative_RF (float): The relative RF distance.
+             - max_RF (float): The maximum RF distance.
+             - effective_tree_size (int): The effective size of the tree.
+             - ref_edges_in_source (list): The edges in the source tree that are also in the reference tree.
+             - source_edges_in_ref (list): The edges in the reference tree that are also in the source tree.
+             - common_edges (list): The edges that are common between the two trees.
+             - source_edges (list): The edges in the source tree.
+             - ref_edges (list): The edges in the reference tree.
         """
+        
         logger.debug(f"Comparing trees with reference to {ref_tree}")
         if ref_tree == "topology_tree":
             tree2 = self.topology_trees[i] # get which topology tree to use as reference tree
         else:
             raise ValueError("Unknown reference tree specified.")
 
-        return compare_trees(tree1, tree2, unrooted_trees=unrooted)
+
+
+        def _compare_trees(tree1, tree2, unrooted_trees=False):
+            """
+            Compare two trees and return RF dist info.
+            (Copied in (from from celltreebench.utils.reconstruction_eval import compare_trees) and changed function b/c needed additional info (common_edges and source_edges and ref_edges))
+            """
+            def _is_unrooted(tree):
+                return len(tree.get_children()) != 2
+            
+            if unrooted_trees:
+                if not _is_unrooted(tree1):
+                    tree1 = tree1.copy()
+                    tree1.unroot()
+                if not _is_unrooted(tree2):
+                    tree2 = tree2.copy()
+                    tree2.unroot()
+            else:
+                if _is_unrooted(tree1) or _is_unrooted(tree2):
+                    raise ValueError("Both trees must be rooted for rooted comparison")
+
+            res = tree1.compare(tree2, unrooted=unrooted_trees)
+            return {
+                "rf": res["rf"],
+                "relative_rf": res["norm_rf"],
+                "max_rf": res["max_rf"],
+                "effective_tree_size": res["effective_tree_size"],
+                "ref_edges_in_source": res["ref_edges_in_source"],
+                "source_edges_in_ref": res["source_edges_in_ref"],
+                "common_edges": res["common_edges"],
+                "source_edges": res["source_edges"],
+                "ref_edges": res["ref_edges"]
+                }
+        
+        return _compare_trees(tree1, tree2, unrooted_trees=unrooted)
+        # return compare_trees(tree1, tree2, unrooted_trees=unrooted)
 
     def create_ref_dm(self):
         self.ref_dm = []  # List of reference distance matrices for each topology tree

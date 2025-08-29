@@ -41,6 +41,7 @@ from celltreeqm_attention import CellTreeQMAttention
 # Import CellTreeBench dataset loader
 from celltreebench.datasets.celegans import load_celegans_supervised_split
 from celltreebench.datasets.phylo_dataset_creator import PhyloDatasetCreator
+from math import comb
 
 
 def setup_logging():
@@ -346,6 +347,9 @@ def train_one_epoch(
                     f"P_push={batch_P_push.item():.4f}, "
                     f"Gate={gate_loss.item():.4f}"
                 )
+                # Edge split stats
+                logging.info(f"  Edge split stats: Common={train_metrics['split_prop_common_train']:.4f}, "
+                             f"Ref={train_metrics['split_prop_ref_train']:.4f}")
 
             model.train()  # Return to train mode
 
@@ -358,6 +362,16 @@ def train_one_epoch(
         "step_metrics": epoch_metrics,
     }
 
+def avg_edge_split_proportion(edges):
+    """
+    Calculate the average proportion of edge splits for a list of edge pairs.
+    """
+    lens = []
+    for e in edges:
+        if min(len(e[0]), len(e[1])) > 1:
+            lens.append(comb(len(e[0]), 2) * comb(len(e[1]), 2))
+
+    return sum(lens)/len(lens) if len(lens) > 0 else 0
 
 def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", gen=None):
     """
@@ -382,6 +396,8 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
             f"rf_{dataset_name}": [],
             f"rf_max_{dataset_name}": [],
             f"quartet_dist_{dataset_name}": [],
+            f"split_prop_common_{dataset_name}": [],
+            f"split_prop_ref_{dataset_name}": [],
             }
         for i, get_node_mtx in enumerate(dataset.get_node_mtx()):
             # Get embeddings and distance matrix
@@ -392,8 +408,11 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
                 # Reconstruct tree from embedding
             emb_tree = reconstruct_from_dm(emb_dm, node_names, method="nj")
 
+
             # Compare with reference tree
             emb_topo_res = dataset.compare_trees(emb_tree, i, ref_tree="topology_tree")
+            logging.info(f"split prop common edge {avg_edge_split_proportion(emb_topo_res['common_edges'])}")
+            logging.info(f"split prop ref edge {avg_edge_split_proportion(emb_topo_res['ref_edges'])}")
 
             # Compute quartet distance
             pts_mtx = (
@@ -417,7 +436,10 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
             eval_results[f"rf_{dataset_name}"].append(emb_topo_res["rf"])
             eval_results[f"rf_max_{dataset_name}"].append(emb_topo_res["max_rf"])
             eval_results[f"quartet_dist_{dataset_name}"].append(quartet_dist.item())
-
+        
+        eval_results[f"split_prop_common_{dataset_name}"] = sum(eval_results[f"split_prop_common_{dataset_name}"])/len(eval_results[f"split_prop_common_{dataset_name}"]) # average between trees
+        eval_results[f"split_prop_ref_{dataset_name}"] = sum(eval_results[f"split_prop_ref_{dataset_name}"])/len(eval_results[f"split_prop_ref_{dataset_name}"]) # average between trees
+        
         eval_results[f"rf_{dataset_name}"] = sum(eval_results[f"rf_{dataset_name}"])/sum(eval_results[f"rf_max_{dataset_name}"]) # average between trees
         eval_results[f"quartet_dist_{dataset_name}"] = sum(eval_results[f"quartet_dist_{dataset_name}"])/len(eval_results[f"quartet_dist_{dataset_name}"]) # average between trees
         return eval_results
@@ -533,15 +555,15 @@ def main():
         "base_dir": "/workspaces/CellTreeBench",
         # Training
         "lr": 0.0001,
-        "weight_decay": 0.01,
-        "weight_D": 0.1,
-        "weight_P": 20.0,
-        "weight_close": 1.0,
-        "weight_push": 30.0,
-        "push_margin": 0.1,
-        "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
+        "weight_decay": 0.001,
+        "weight_D": 6.0,
+        "weight_P": 4.0,
+        "weight_close": 0.5,
+        "weight_push": 1.0,
+        "push_margin": 0.2,
+        "batch_size": 1024,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 2000,
+        "eval_interval": 100,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
