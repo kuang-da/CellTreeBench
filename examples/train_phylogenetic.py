@@ -347,6 +347,7 @@ def train_one_epoch(
                     f"P_push={batch_P_push.item():.4f}, "
                     f"Gate={gate_loss.item():.4f}"
                 )
+                
                 # Edge split stats
                 logging.info(f"  Edge split stats: Common={train_metrics['split_prop_common_train']:.4f}, "
                              f"Ref={train_metrics['split_prop_ref_train']:.4f}")
@@ -411,8 +412,9 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
 
             # Compare with reference tree
             emb_topo_res = dataset.compare_trees(emb_tree, i, ref_tree="topology_tree")
-            logging.info(f"split prop common edge {avg_edge_split_proportion(emb_topo_res['common_edges'])}")
-            logging.info(f"split prop ref edge {avg_edge_split_proportion(emb_topo_res['ref_edges'])}")
+
+            eval_results[f"split_prop_common_{dataset_name}"].append(avg_edge_split_proportion(emb_topo_res["common_edges"]))
+            eval_results[f"split_prop_ref_{dataset_name}"].append(avg_edge_split_proportion(emb_topo_res["ref_edges"]))
 
             # Compute quartet distance
             pts_mtx = (
@@ -694,6 +696,7 @@ def main():
     test_metrics = evaluate_model(
                     model, test_dataset, config, device, "test", gen=gen
                 )
+    
     logging.info(
                     f"Pre-training evaluations: "
                     f"Train RF: {train_metrics['rf_train']:.4f} | "
