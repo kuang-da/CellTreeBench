@@ -27,7 +27,7 @@ class PhyloDatasetCreator():
     """
     This class creates all the phylogenetic datasets you need. Will read data. Will split data if necessary. Etc.
     """
-    def __init__(self, dataset, dataset_names=[""], tree_directory="trees", msa_directory="msas", data_dir=DATA_ROOT, autosplit=False, seed=None):
+    def __init__(self, dataset, dataset_names=[""], tree_directory="trees", msa_directory="msas", data_dir=DATA_ROOT, autosplit=None, seed=None):
         """
         Initialize the PhyloDatasetCreator.
 
@@ -37,8 +37,7 @@ class PhyloDatasetCreator():
             tree_directory (str): Name of the phylogenetic tree directory in the dataset.
             msa_directory (str): Name of the multiple sequence alignment (MSA) directory in the dataset.
             data_dir (str): Directory where the master dataset is stored.
-            autosplit (bool): Whether to enable automatic splitting of the dataset or to read from seperate files.
-            seed (int): Random seed for reproducibility.
+            autosplit (str): Whether to enable automatic splitting of the dataset or to read from seperate files and what method to use. Options are None, "sites", or "leaves".
         """
         self.tree_directory = tree_directory
         self.msa_directory = msa_directory
@@ -58,7 +57,13 @@ class PhyloDatasetCreator():
             
             trees = self._read_all_trees()
             msas = self._read_all_msas()
-            dataset_trees, dataset_msas = self._split_data(trees, msas, dataset_proportions, rng=np.random.default_rng(seed)) # splits data
+
+            if autosplit == "sites":
+                dataset_msas = self._split_data_site(msas, dataset_proportions, rng=np.random.default_rng(seed)) # splits data by sites
+                dataset_trees = {dataset_name: trees for dataset_name in dataset_proportions.keys()} # trees are not split when splitting by sites
+
+            elif autosplit == "leaves":
+                dataset_trees, dataset_msas = self._split_data_leaves(trees, msas, dataset_proportions, rng=np.random.default_rng(seed)) # splits data by leaves
         
         # split proportions are no longer necessary. Dataset names will now be a list of just the dataset names
         if type(dataset_names) == dict:
@@ -103,7 +108,7 @@ class PhyloDatasetCreator():
                 )
         return created_datasets
             
-    def _split_data(self, trees, msas, props, rng):
+    def _split_data_leaves(self, trees, msas, props, rng):
         """
         Split the data by leaves into sets based on the given proportions.
 
@@ -131,6 +136,38 @@ class PhyloDatasetCreator():
                 prev_point = point
 
         return split_trees, split_msas
+    
+
+
+    def _split_data_site(self, msas, props, rng):
+        """
+        Split the data by sites into sets based on the given proportions.
+
+        Args:
+            msas (list): List of pd DataFrames containing the MSA data.
+            props (dict): Dictionary containing the proportions for each dataset.
+            rng (np.random.Generator): Random number generator.
+
+        Returns:
+            Dictionary: containing the split MSAs each dataset.
+        """
+        split_msas = {dataset_name: [] for dataset_name in props.keys()} # {dataset name: [msa, msa, ...]}
+        for msa in msas: # iterate over msa. (each dataset gets its proportion of each msa)
+            num_sites = msa.shape[1]//22 # each site has 22 columns (20 amino acids + unknown + gap)
+            idx = rng.permutation(num_sites) # permute site indices and convert to column indices
+            prev_point = 0
+            point = 0
+            for dataset, prop in props.items(): 
+                point += round(num_sites * prop) # calculate the endpoint for the current dataset based on permuted index and proportion
+                idx_dataset = []
+
+                for i in idx[prev_point:point]:
+                    idx_dataset += range(22*i, 22*(i+1)) # get selected site indices
+
+                split_msas[dataset].append(msa.iloc[:, idx_dataset]) # msa with only the selected sites
+                prev_point = point
+
+        return split_msas
 
     def get_dataset(self, datasets=None):
         """
@@ -187,7 +224,7 @@ class PhyloDatasetCreator():
                 trees.append(tree)
         return trees
     
-    def _read_phylo_msa(self, path, filename, alphabet=b"ARNDCQEGHILKMFPSTWYVX-"):
+    def _read_phylo_msa(self, path, filename, alphabet="ARNDCQEGHILKMFPSTWYVX-"):
         """
         Read phylogenetic MSA and parse into pd dataframe with one-hot encoding
         
@@ -206,11 +243,11 @@ class PhyloDatasetCreator():
         msa_file = os.path.join(path, filename)
         sequences, ids = [], []
         lookup = {char: index for index, char in enumerate(alphabet)}
-        with open(msa_file, "rb") as f:
+        with open(msa_file, "r") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith(b">"): # get leaf name/id
-                    ids.append(line[1:].decode("utf8"))
+                if line.startswith(">"): # get leaf name/id
+                    ids.append(line[1:])
                     sequences.append([])
                 else:
                     for char in line:# iterate over each character in the sequence and convert to one-hot
