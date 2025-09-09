@@ -563,9 +563,9 @@ def main():
         "weight_close": 1.0,
         "weight_push": 30.0,
         "push_margin": 0.1,
-        "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
+        "batch_size": 8192,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 1000,
+        "eval_interval": 6000,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
