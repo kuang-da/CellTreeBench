@@ -548,7 +548,7 @@ def main():
         # Random Seed
         "seed": 42,
         # Dataset
-        "dataset_name": "phylogenetic/cellreg_200tips", # where to find data (parent directory of both train and test if using pre-split data)
+        "dataset_name": "phylogenetic/200tips", # where to find data (parent directory of both train and test if using pre-split data)
         "dataset_names": {"train":0.5, "test":0.5}, #datasets to generate. Also can include split proportions if autosplit is enabled (but be careful because uneven splits may cause zero padding)
         "tree_directory": "trees", # where to find trees (within dataset directory)
         "msa_directory": "msas", # where to find MSAs (within dataset directory)
@@ -557,15 +557,15 @@ def main():
         "base_dir": "/workspaces/CellTreeBench",
         # Training
         "lr": 0.0001,
-        "weight_decay": 0.01,
-        "weight_D": 0.1,
-        "weight_P": 20.0,
-        "weight_close": 1.0,
-        "weight_push": 30.0,
-        "push_margin": 0.1,
-        "batch_size": 8192,  # Reduced from 2048 for high-dimensional data
+        "weight_decay": 0.001,
+        "weight_D": 6.0,
+        "weight_P": 4.0,
+        "weight_close": 0.5,
+        "weight_push": 1.0,
+        "push_margin": 0.2,
+        "batch_size": 2048,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 6000,
+        "eval_interval": 1000,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
@@ -585,9 +585,9 @@ def main():
 
     device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
-    # gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
-    # torch.manual_seed(config["seed"])  # Set global seed for reproducibility
-    gen = None
+    gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
+    torch.manual_seed(config["seed"])  # Set global seed for reproducibility
+    # gen = None
 
     # Load dataset
     logging.info(f"Loading {config['dataset_name']} dataset...")

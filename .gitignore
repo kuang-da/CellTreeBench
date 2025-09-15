@@ -13,3 +13,4 @@ data
 __pycache__
 *.json
 *.png
+graphs
