@@ -498,7 +498,8 @@ class CElegansDatasetBase(Dataset):
             or dataset_name == "celegans_mid"
             or dataset_name == "cbriggsae_mid"
         ):
-            tree = Tree(tree_file_name, format=1)
+            # Ensure ete3 receives a string path
+            tree = Tree(str(tree_file_name), format=1)
         else:
             raise ValueError("Unknown dataset name")
         return tree
