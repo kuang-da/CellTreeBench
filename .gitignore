@@ -14,3 +14,7 @@ __pycache__
 *.json
 *.png
 graphs
+.env
+examples/logs
+playground/notebooks
+examples/exp.log

@@ -126,7 +126,7 @@ def _full_to_condensed(distance_matrix):
     return condensed_matrix
 
 
-def distance_error(
+def _distance_error_matrix(
     orig_point_matrix,
     transformed_point_matrix,
     diff_norm="fro",
@@ -180,6 +180,97 @@ def distance_error(
     # Average the error across all samples in the batch
     error = torch.mean(error)
     return error
+
+def _distance_error_stats(
+    orig_point_matrix,
+    transformed_point_matrix,
+    diff_norm="fro",
+    dist_metric="euclidean",
+):
+    """Encourage embeddings to retain global pairwise distance statistics.
+
+    Rather than matching every entry in the distance matrix, this loss only
+    aligns the mean and standard deviation of the pairwise distances. The
+    softer constraint helps avoid embedding collapse while leaving supervised
+    losses to determine fine-grained structure.
+
+    Args:
+        orig_point_matrix (Tensor): Tensor of shape (B, M, N) for the original data.
+        transformed_point_matrix (Tensor): Tensor of shape (B, M, K) for the transformed embeddings.
+        diff_norm (str or int): Ignored, kept for API compatibility.
+        dist_metric (str): Distance metric passed to :func:`pairwise_distances`.
+
+    Returns:
+        Tensor: Scalar loss encouraging similar distance statistics.
+    """
+
+    if orig_point_matrix.dim() != 3 or transformed_point_matrix.dim() != 3:
+        raise ValueError("The shape must be (B, M, N).")
+    if orig_point_matrix.size(1) != transformed_point_matrix.size(1):
+        raise ValueError(
+            "The second dimension (number of points) must be the same for both input matrices."
+        )
+
+    dis_orig = pairwise_distances(orig_point_matrix, metric=dist_metric)
+    dis_transformed = pairwise_distances(transformed_point_matrix, metric=dist_metric)
+
+    if dis_orig.size(-1) < 2:
+        return torch.tensor(0.0, device=orig_point_matrix.device)
+
+    idx = torch.triu_indices(
+        dis_orig.size(-2),
+        dis_orig.size(-1),
+        offset=1,
+        device=dis_orig.device,
+    )
+
+    orig_vals = dis_orig[..., idx[0], idx[1]]
+    trans_vals = dis_transformed[..., idx[0], idx[1]]
+
+    orig_mean = orig_vals.mean(dim=-1)
+    trans_mean = trans_vals.mean(dim=-1)
+    mean_loss = (trans_mean - orig_mean) ** 2
+
+    orig_std = orig_vals.std(dim=-1, unbiased=False)
+    trans_std = trans_vals.std(dim=-1, unbiased=False)
+    std_loss = (trans_std - orig_std) ** 2
+
+    return (mean_loss + std_loss).mean()
+
+def distance_error(
+    orig_point_matrix,
+    transformed_point_matrix,
+    diff_norm="fro",
+    dist_metric="euclidean",
+    alpha=0.5,
+):
+    """Blend matrix-level and statistical distance regularisers.
+
+    Args:
+        orig_point_matrix (Tensor): Original features of shape (B, M, N).
+        transformed_point_matrix (Tensor): Transformed embeddings of shape (B, M, K).
+        diff_norm (str or int): Passed to the matrix-based loss for compatibility.
+        dist_metric (str): Distance metric passed to the underlying losses.
+        alpha (float): Weight for the matrix loss; statistical loss uses (1-alpha).
+
+    Returns:
+        Tensor: Scalar loss combining both regularisers.
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be between 0 and 1")
+    loss_matrix = _distance_error_matrix(
+        orig_point_matrix,
+        transformed_point_matrix,
+        diff_norm=diff_norm,
+        dist_metric=dist_metric,
+    )
+    loss_stats = _distance_error_stats(
+        orig_point_matrix,
+        transformed_point_matrix,
+        diff_norm=diff_norm,
+        dist_metric=dist_metric,
+    )
+    return alpha * loss_matrix + (1 - alpha) * loss_stats
 
 
 def pairwise_cosine_distance(x: torch.Tensor) -> torch.Tensor:

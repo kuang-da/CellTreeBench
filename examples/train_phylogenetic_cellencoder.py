@@ -92,7 +92,7 @@ def check_embedding(get_node_mtx, model, dist_metric, device):
         return embeddings, dm, node_names
     
 
-def create_model(input_dim, device="cpu"):
+def create_model(input_dim, device="cpu", encoder_config=None):
     """
     Create the CellTreeQMAttention model with config parameters.
 
@@ -105,16 +105,33 @@ def create_model(input_dim, device="cpu"):
     """
     # Model configuration from the config file
     config = {
-        "proj_dim": 1024,
+        "proj_dim": 512,
         "output_dim": 128,
-        "hidden_dim": 1024,
+        "hidden_dim": 512,
         "num_heads": 2,
-        "num_layers": 8,
-        "dropout_data": 0.1,
-        "dropout_metric": 0.1,
+        "num_layers": 4,
+        "dropout_data": 0.2,
+        "dropout_metric": 0.2,
         "norm_method": None,
         "gate_type": "none",  # No gating for this example
+        # Cell encoder configuration defaults
+        "cell_encoder_type": "linear",
+        "site_alphabet_size": 22,
+        "site_embed_dim": 64,
+        "site_encoder_heads": 4,
+        "site_encoder_layers": 2,
+        "site_dropout": 0.1,
     }
+
+    if encoder_config is not None:
+        config.update({
+            "cell_encoder_type": encoder_config.get("cell_encoder_type", config["cell_encoder_type"]),
+            "site_alphabet_size": encoder_config.get("site_alphabet_size", config["site_alphabet_size"]),
+            "site_embed_dim": encoder_config.get("site_embed_dim", config["site_embed_dim"]),
+            "site_encoder_heads": encoder_config.get("site_encoder_heads", config["site_encoder_heads"]),
+            "site_encoder_layers": encoder_config.get("site_encoder_layers", config["site_encoder_layers"]),
+            "site_dropout": encoder_config.get("site_dropout", config["site_dropout"]),
+        })
 
     model = CellTreeQMAttention(
         input_dim=input_dim,
@@ -128,6 +145,12 @@ def create_model(input_dim, device="cpu"):
         proj_dim=config["proj_dim"],
         gate_mode=config["gate_type"],
         device=device,
+        cell_encoder_type=config["cell_encoder_type"],
+        site_alphabet_size=config["site_alphabet_size"],
+        site_embed_dim=config["site_embed_dim"],
+        site_encoder_heads=config["site_encoder_heads"],
+        site_encoder_layers=config["site_encoder_layers"],
+        site_dropout=config["site_dropout"],
     )
 
     return model.to(device)
@@ -580,21 +603,27 @@ def main():
         # Training
         "lr": 0.0001,
         "weight_decay": 0.001,
-        "weight_D": 5, # 6.0, 4.0, 1.0
-        "weight_P": 200.0,
+        "weight_D": 0.05, # 6.0, 4.0, 1.0
+        "weight_P": 10.0,
         "weight_close": 1.0,
-        "weight_push": 30.0,
+        "weight_push": 1.0,
         "push_margin": 0.1,
-        "distance_error_alpha": 0.3,
+        "distance_error_alpha": 1,
         "batch_size": 8_192,  # Reduced from 2048 for high-dimensional data
         "num_epochs": 60,
-        "eval_interval": 1000,
+        "eval_interval": 4000,
         "weight_gate": -1.0,  # Disabled
         # Model
         "metric": "euclidean",
         "metric_loss": "additivity",  # Can be "additivity", "triplet", or "quadruplet"
+        "cell_encoder_type": "site_transformer", 
+        "site_alphabet_size": 22,
+        "site_embed_dim": 128,
+        "site_encoder_heads": 4,
+        "site_encoder_layers": 2,
+        "site_dropout": 0.1,
         # Device
-        "device": "cuda:0" if torch.cuda.is_available() else "cpu",
+        "device": "cuda:1" if torch.cuda.is_available() else "cpu",
         
 
     }
@@ -698,7 +727,7 @@ def main():
 
     # Create model
     logging.info("Creating CellTreeQMAttention model...")
-    model = create_model(input_dim, str(device))
+    model = create_model(input_dim, str(device), config)
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
