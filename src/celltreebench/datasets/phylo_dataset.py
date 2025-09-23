@@ -1,8 +1,11 @@
 import logging
 import os
-from torch.utils.data import Dataset
-import pandas as pd
 from math import comb
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
 
 from celltreebench.utils.tree_operations import get_path_distance_matrix
 # from celltreebench.utils.reconstruction_eval import compare_trees
@@ -38,6 +41,18 @@ class PhyloDataset(Dataset):
         self.data = msas
         self.data_normalized = self._zero_pad(self.data, max_length) # skipping normalization (other than zero padding). I don't think it makes sense with one-hot encoding
         self.topology_trees = trees
+
+        # Cache frequently accessed tensors to avoid repeated host->device transfers.
+        self._node_names = [list(df.index) for df in self.data_normalized]
+        self._node_tensors_cpu = []
+        for df in self.data_normalized:
+            arr = df.to_numpy(dtype=np.float32, copy=True)
+            tensor = torch.from_numpy(arr)
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            self._node_tensors_cpu.append(tensor.pin_memory())
+        self._node_tensor_cache = {"cpu": self._node_tensors_cpu}
+
         self.create_ref_dm()
 
     def get_proportions(self):
@@ -85,6 +100,38 @@ class PhyloDataset(Dataset):
             "node_mtx": data.to_numpy(),
             "node_names": data.index
         } for data in self.data_normalized]
+    
+    def get_node_tensors(self, device=None, add_batch_dim=False):
+        """Return cached node feature tensors on the requested device."""
+        device = torch.device(device) if device is not None else torch.device("cpu")
+        device_key = str(device)
+        if device_key not in self._node_tensor_cache:
+            base = self._node_tensor_cache["cpu"]
+            self._node_tensor_cache[device_key] = [
+                tensor.to(device, non_blocking=True) for tensor in base
+            ]
+        tensors = self._node_tensor_cache[device_key]
+        if add_batch_dim:
+            return [tensor.unsqueeze(0) for tensor in tensors]
+        return tensors
+    
+    def get_node_names(self):
+        """Return node name lists in a stable order."""
+        return self._node_names
+    
+    def get_ref_distance_matrices(self, device=None, add_batch_dim=False):
+        """Return cached reference distance matrices on the requested device."""
+        device = torch.device(device) if device is not None else torch.device("cpu")
+        device_key = str(device)
+        if device_key not in self._ref_dm_cache:
+            base = self._ref_dm_cache["cpu"]
+            self._ref_dm_cache[device_key] = [
+                dm.to(device, non_blocking=True) for dm in base
+            ]
+        tensors = self._ref_dm_cache[device_key]
+        if add_batch_dim:
+            return [dm.unsqueeze(0) for dm in tensors]
+        return tensors
     
     def compare_trees(self, tree1, i, ref_tree="topology_tree", unrooted=True):
         """
@@ -156,4 +203,10 @@ class PhyloDataset(Dataset):
         self.ref_dm = []  # List of reference distance matrices for each topology tree
         for i, tree in enumerate(self.topology_trees): # for all trees
             leave_names = self.data[i].index # use MSA leaves because they are in the correct order (the tree leaves may not be due to reordering when pruninng)
-            self.ref_dm.append(get_path_distance_matrix(tree, leave_names))
+            dm = get_path_distance_matrix(tree, leave_names)
+            if dm.device.type != "cpu":
+                dm = dm.cpu()
+            dm = dm.to(dtype=torch.float32).pin_memory()
+            self.ref_dm.append(dm)
+        self._ref_dm_cache = {"cpu": self.ref_dm}
+

@@ -10,6 +10,27 @@ from Bio.Phylo.TreeConstruction import DistanceMatrix, DistanceTreeConstructor
 import Bio.Phylo as Phylo
 from io import StringIO
 
+def _triu_vector(dm: torch.Tensor) -> torch.Tensor:
+    """把成对距离矩阵提取为上三角向量。
+    支持 (B,N,N) 或 (N,N)，返回形状为 (B, P) 的向量，其中 P=N*(N-1)/2。
+    """
+    if dm.dim() == 2:
+        dm = dm.unsqueeze(0)  # (1,N,N)
+    B, N, _ = dm.shape
+    idx = torch.triu_indices(N, N, offset=1, device=dm.device)
+    vec = dm[:, idx[0], idx[1]]  # (B, P)
+    return vec
+
+def _align_scale_vec(vec_est: torch.Tensor, vec_ref: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    """对齐尺度：给定两个 (B,P) 的距离向量，求 s 使得 || s*vec_est - vec_ref ||_2 最小。
+    返回 (s, vec_est_aligned) 其中 s 形状为 (B,)。
+    """
+    # s = (e·r) / (e·e)
+    num = (vec_est * vec_ref).sum(dim=1)                # (B,)
+    den = (vec_est * vec_est).sum(dim=1).clamp_min(eps) # (B,)
+    s = num / den                                       # (B,)
+    vec_est_aligned = vec_est * s.unsqueeze(1)          # (B,P)
+    return s, vec_est_aligned
 
 def dm_to_etree(dm, node_names=None, method="nj"):
     """
@@ -125,61 +146,175 @@ def _full_to_condensed(distance_matrix):
     condensed_matrix = distance_matrix[upper_triangle_indices]
     return condensed_matrix
 
+def _zscore_vec(v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """对 (B,P) 向量做逐 batch z-score。"""
+    m = v.mean(dim=1, keepdim=True)
+    sd = v.std(dim=1, unbiased=False, keepdim=True).clamp_min(eps)
+    return (v - m) / sd
+
+def distance_error_from_dm(
+    dm_est: torch.Tensor,
+    dm_ref: torch.Tensor,
+    diff_norm="fro",             # "fro" | 1 | 2 | "inf"
+    alpha: float = 0.5,          # 与 distance_error 相同的 blend
+    align: str = "scale",        # "scale" | "zscore" | "none"
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    直接以“距离矩阵”为输入，比较 dm_est 与 dm_ref。
+    - matrix 项：上三角向量对齐后做 L2/L1/Linf 误差
+    - stats  项：上三角均值/标准差的 MSE（与你现有 _distance_error_stats 一致）
+    """
+    if dm_est.dim() == 2: dm_est = dm_est.unsqueeze(0)
+    if dm_ref.dim() == 2: dm_ref = dm_ref.unsqueeze(0)
+    assert dm_est.shape == dm_ref.shape and dm_est.dim() == 3, "dm_est/dm_ref 需为 (B,N,N) 同形状"
+
+    v_est = _triu_vector(dm_est)   # (B,P)
+    v_ref = _triu_vector(dm_ref)   # (B,P)
+
+    # 对齐（只作用在 matrix 项；与你 distance_error 的行为保持一致）
+    if align == "scale":
+        _, v_est_aligned = _align_scale_vec(v_est, v_ref, eps=eps)
+    elif align == "zscore":
+        v_est_aligned = _zscore_vec(v_est, eps)
+        v_ref        = _zscore_vec(v_ref, eps)
+    elif align == "none":
+        v_est_aligned = v_est
+    else:
+        raise ValueError("align must be 'scale', 'zscore' or 'none'.")
+
+    diff = v_est_aligned - v_ref
+    if diff_norm in ("fro", 2):
+        loss_matrix = (diff.pow(2).mean(dim=1)).sqrt().mean()
+    elif diff_norm == 1:
+        loss_matrix = diff.abs().mean(dim=1).mean()
+    elif diff_norm == "inf":
+        loss_matrix = diff.abs().amax(dim=1).mean()
+    else:
+        raise ValueError(f"Unsupported norm type '{diff_norm}'.")
+
+    # 统计项（均值/标准差）
+    est_mean = v_est.mean(dim=1)
+    ref_mean = v_ref.mean(dim=1)
+    est_std  = v_est.std (dim=1, unbiased=False)
+    ref_std  = v_ref.std (dim=1, unbiased=False)
+    loss_stats = ((est_mean - ref_mean)**2 + (est_std - ref_std)**2).mean()
+
+    return alpha * loss_matrix + (1.0 - alpha) * loss_stats
 
 def _distance_error_matrix(
     orig_point_matrix,
     transformed_point_matrix,
     diff_norm="fro",
     dist_metric="euclidean",
+    align: str = "scale",      # 新增：'scale' | 'zscore' | 'none'
+    eps: float = 1e-8,
 ):
     """
-    Compute the error between pairwise distance matrices of the original and transformed points.
-
-    Args:
-        orig_point_matrix (Tensor): Tensor of shape (B, M, N), representing the original points.
-        transformed_point_matrix (Tensor): Tensor of shape (B, M, K), representing the transformed points.
-        diff_norm (str or int): Norm type to use for computing the error. Options are 'fro' (Frobenius norm) or any valid p-norm (e.g., 1, 2).
-        dist_metric (str): Distance metric to use when computing pairwise distances. Options are 'cosine', 'euclidean', 'manhattan'.
-
-    Returns:
-        Tensor: A scalar tensor representing the mean distance error between the original and transformed points.
+    比较原始与嵌入的成对距离矩阵的误差；支持先做尺度对齐（'scale'），
+    或 z-score 对齐（'zscore'），或不对齐（'none'）。
+    返回一个标量损失（对 batch 做平均）。
     """
     valid_norms = ["fro", 1, 2, "inf"]
     if diff_norm not in valid_norms:
-        raise ValueError(
-            f"Unsupported norm type '{diff_norm}'. Supported options are 'fro', 1, or 2."
-        )
-    elif diff_norm == "inf":
-        diff_norm = np.inf
+        raise ValueError(f"Unsupported norm type '{diff_norm}'.")
 
-    if len(orig_point_matrix.size()) != 3 or len(transformed_point_matrix.size()) != 3:
+    if orig_point_matrix.dim() != 3 or transformed_point_matrix.dim() != 3:
         raise ValueError("The shape must be (B, M, N).")
-    else:
-        if orig_point_matrix.size(1) != transformed_point_matrix.size(1):
-            raise ValueError(
-                "The second dimension (number of points) must be the same for both input matrices."
-            )
+    if orig_point_matrix.size(1) != transformed_point_matrix.size(1):
+        raise ValueError("The second dimension (number of points) must match.")
 
+    # 成对距离（B,N,N）
     dis_orig = pairwise_distances(orig_point_matrix, metric=dist_metric)
-    dis_transformed = pairwise_distances(transformed_point_matrix, metric=dist_metric)
+    dis_trans = pairwise_distances(transformed_point_matrix, metric=dist_metric)
 
-    # Get the number of features (dimensions) for normalization
-    orig_num_features = orig_point_matrix.size(2)
-    if not isinstance(orig_num_features, torch.Tensor):
-        orig_num_features = torch.tensor(orig_num_features, dtype=torch.float32)
+    # 上三角向量 (B,P)
+    v_ref = _triu_vector(dis_orig)
+    v_est = _triu_vector(dis_trans)
 
-    transformed_num_features = transformed_point_matrix.size(2)
+    # 对齐
+    if align == "scale":
+        s, v_est_aligned = _align_scale_vec(v_est, v_ref, eps=eps)  # s 可用于诊断
+    elif align == "zscore":
+        # 双方做 z-score 归一化（移除平移与缩放）
+        def _z(x):
+            m = x.mean(dim=1, keepdim=True)
+            sd = x.std(dim=1, unbiased=False, keepdim=True).clamp_min(eps)
+            return (x - m) / sd
+        v_ref = _z(v_ref)
+        v_est_aligned = _z(v_est)
+    elif align == "none":
+        v_est_aligned = v_est
+    else:
+        raise ValueError("align must be 'scale', 'zscore' or 'none'.")
 
-    # Normalize the pairwise distances by the square root of the number of features
-    dis_orig = dis_orig / torch.sqrt(orig_num_features)
-    dis_transformed = dis_transformed / torch.sqrt(
-        torch.tensor(transformed_num_features, dtype=torch.float32)
-    )
-    error = torch.linalg.matrix_norm(dis_orig - dis_transformed, ord=diff_norm)
+    # 误差（按 diff_norm 聚合）。为数值稳定及可解释，这里用“每样本 RMS/L1/Linf 再取 batch 平均”
+    diff = v_est_aligned - v_ref  # (B,P)
+    if diff_norm in ("fro", 2):
+        # root-mean-square over pairs, then mean over batch
+        err = (diff.pow(2).mean(dim=1)).sqrt().mean()
+    elif diff_norm == 1:
+        err = diff.abs().mean(dim=1).mean()
+    elif diff_norm == "inf":
+        err = diff.abs().amax(dim=1).mean()
 
-    # Average the error across all samples in the batch
-    error = torch.mean(error)
-    return error
+    return err
+
+
+# def _distance_error_matrix(
+#     orig_point_matrix,
+#     transformed_point_matrix,
+#     diff_norm="fro",
+#     dist_metric="euclidean",
+# ):
+#     """
+#     Compute the error between pairwise distance matrices of the original and transformed points.
+
+#     Args:
+#         orig_point_matrix (Tensor): Tensor of shape (B, M, N), representing the original points.
+#         transformed_point_matrix (Tensor): Tensor of shape (B, M, K), representing the transformed points.
+#         diff_norm (str or int): Norm type to use for computing the error. Options are 'fro' (Frobenius norm) or any valid p-norm (e.g., 1, 2).
+#         dist_metric (str): Distance metric to use when computing pairwise distances. Options are 'cosine', 'euclidean', 'manhattan'.
+
+#     Returns:
+#         Tensor: A scalar tensor representing the mean distance error between the original and transformed points.
+#     """
+#     valid_norms = ["fro", 1, 2, "inf"]
+#     if diff_norm not in valid_norms:
+#         raise ValueError(
+#             f"Unsupported norm type '{diff_norm}'. Supported options are 'fro', 1, or 2."
+#         )
+#     elif diff_norm == "inf":
+#         diff_norm = np.inf
+
+#     if len(orig_point_matrix.size()) != 3 or len(transformed_point_matrix.size()) != 3:
+#         raise ValueError("The shape must be (B, M, N).")
+#     else:
+#         if orig_point_matrix.size(1) != transformed_point_matrix.size(1):
+#             raise ValueError(
+#                 "The second dimension (number of points) must be the same for both input matrices."
+#             )
+
+#     dis_orig = pairwise_distances(orig_point_matrix, metric=dist_metric)
+#     dis_transformed = pairwise_distances(transformed_point_matrix, metric=dist_metric)
+
+#     # Get the number of features (dimensions) for normalization
+#     orig_num_features = orig_point_matrix.size(2)
+#     if not isinstance(orig_num_features, torch.Tensor):
+#         orig_num_features = torch.tensor(orig_num_features, dtype=torch.float32)
+
+#     transformed_num_features = transformed_point_matrix.size(2)
+
+#     # Normalize the pairwise distances by the square root of the number of features
+#     dis_orig = dis_orig / torch.sqrt(orig_num_features)
+#     dis_transformed = dis_transformed / torch.sqrt(
+#         torch.tensor(transformed_num_features, dtype=torch.float32)
+#     )
+#     error = torch.linalg.matrix_norm(dis_orig - dis_transformed, ord=diff_norm)
+
+#     # Average the error across all samples in the batch
+#     error = torch.mean(error)
+#     return error
 
 def _distance_error_stats(
     orig_point_matrix,
@@ -243,6 +378,7 @@ def distance_error(
     diff_norm="fro",
     dist_metric="euclidean",
     alpha=0.5,
+    align: str = "scale",   # 新增，默认做尺度对齐    
 ):
     """Blend matrix-level and statistical distance regularisers.
 
@@ -258,11 +394,13 @@ def distance_error(
     """
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0 and 1")
+    
     loss_matrix = _distance_error_matrix(
         orig_point_matrix,
         transformed_point_matrix,
         diff_norm=diff_norm,
         dist_metric=dist_metric,
+        align=align,
     )
     loss_stats = _distance_error_stats(
         orig_point_matrix,

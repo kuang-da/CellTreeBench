@@ -18,3 +18,5 @@ graphs
 examples/logs
 playground/notebooks
 examples/exp.log
+*.pkl
+*.pth

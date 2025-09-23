@@ -23,7 +23,7 @@ class LinearCellEncoder(BaseCellEncoder):
         return self.projection(x)
 
 
-class SiteTransformerCellEncoder(BaseCellEncoder):
+class SiteTokenEncoder(BaseCellEncoder):
     """Site-aware encoder that shares parameters across sites before aggregation."""
 
     def __init__(
@@ -35,6 +35,7 @@ class SiteTransformerCellEncoder(BaseCellEncoder):
         site_encoder_heads: int = 4,
         site_encoder_layers: int = 2,
         site_dropout: float = 0.1,
+        site_chunk_size: int | None = 32,
     ):
         super().__init__()
         if input_dim % site_alphabet_size != 0:
@@ -60,10 +61,14 @@ class SiteTransformerCellEncoder(BaseCellEncoder):
             self.site_encoder = nn.TransformerEncoder(
                 encoder_layer, num_layers=site_encoder_layers
             )
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, site_embed_dim))
+            nn.init.normal_(self.cls_token, std=0.02)
         else:
             self.site_encoder = None
+            self.cls_token = None
 
         self.output_linear = nn.Linear(site_embed_dim, proj_dim)
+        self.site_chunk_size = None if site_chunk_size in (None, 0) else max(1, int(site_chunk_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.size(-1) != self.input_dim:
@@ -71,18 +76,175 @@ class SiteTransformerCellEncoder(BaseCellEncoder):
 
         batch = x.shape[0]
         x = x.view(batch, self.num_sites, self.site_alphabet_size)
-        x = self.embedding(x)
-        x = self.embedding_norm(x)
-        x = self.embedding_dropout(x)
 
-        if self.site_encoder is not None:
-            # Transformer expects (seq_len, batch, dim)
-            x = x.transpose(0, 1)
-            x = self.site_encoder(x)
-            x = x.transpose(0, 1)
+        if self.site_chunk_size is None or batch <= self.site_chunk_size:
+            x = self.embedding(x)
 
-        x = x.mean(dim=1)  # Aggregate across sites
-        return self.output_linear(x)
+            if self.site_encoder is not None:
+                cls_tokens = self.cls_token.expand(batch, -1, -1)
+                x = torch.cat((cls_tokens, x), dim=1)
+
+            x = self.embedding_norm(x)
+            x = self.embedding_dropout(x)
+
+            if self.site_encoder is not None:
+                x = x.transpose(0, 1)
+                x = self.site_encoder(x)
+                x = x.transpose(0, 1)
+                pooled = x[:, 0, :]
+            else:
+                pooled = x.mean(dim=1)
+
+            return self.output_linear(pooled)
+
+        pooled_chunks = []
+        for chunk in torch.split(x, self.site_chunk_size, dim=0):
+            chunk = self.embedding(chunk)
+
+            if self.site_encoder is not None:
+                cls_tokens = self.cls_token.expand(chunk.size(0), -1, -1)
+                chunk = torch.cat((cls_tokens, chunk), dim=1)
+
+            chunk = self.embedding_norm(chunk)
+            chunk = self.embedding_dropout(chunk)
+
+            if self.site_encoder is not None:
+                chunk = chunk.transpose(0, 1)
+                chunk = self.site_encoder(chunk)
+                chunk = chunk.transpose(0, 1)
+                pooled = chunk[:, 0, :]
+            else:
+                pooled = chunk.mean(dim=1)
+
+            pooled_chunks.append(pooled)
+
+        pooled = torch.cat(pooled_chunks, dim=0)
+        return self.output_linear(pooled)
+
+
+class _MAB(nn.Module):
+    def __init__(self, dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.ln1 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 2, dim),
+        )
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+        attn_out, _ = self.attn(q, k, k)
+        x = self.ln1(q + attn_out)
+        ff_out = self.ff(x)
+        return self.ln2(x + ff_out)
+
+
+class _SAB(nn.Module):
+    def __init__(self, dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.mab = _MAB(dim, num_heads, dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mab(x, x)
+
+
+class _PMA(nn.Module):
+    def __init__(self, dim: int, num_heads: int, num_seeds: int, dropout: float):
+        super().__init__()
+        if num_seeds <= 0:
+            raise ValueError("num_seeds must be positive")
+        self.seeds = nn.Parameter(torch.zeros(1, num_seeds, dim))
+        nn.init.xavier_normal_(self.seeds)
+        self.mab = _MAB(dim, num_heads, dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.size(0)
+        seeds = self.seeds.expand(batch, -1, -1)
+        return self.mab(seeds, x)
+
+
+class SiteSetPoolEncoder(BaseCellEncoder):
+    """Set Transformer style encoder with shared site parameters."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        proj_dim: int,
+        site_alphabet_size: int = 22,
+        site_embed_dim: int = 64,
+        site_encoder_heads: int = 4,
+        site_encoder_layers: int = 2,
+        site_dropout: float = 0.1,
+        site_pma_seeds: int = 4,
+        site_chunk_size: int | None = 32,
+    ):
+        super().__init__()
+        if input_dim % site_alphabet_size != 0:
+            raise ValueError(
+                "input_dim must be divisible by site_alphabet_size when using the site encoder"
+            )
+        self.input_dim = input_dim
+        self.site_alphabet_size = site_alphabet_size
+        self.num_sites = input_dim // site_alphabet_size
+
+        self.embedding = nn.Linear(site_alphabet_size, site_embed_dim)
+        self.embedding_norm = nn.LayerNorm(site_embed_dim)
+        self.embedding_dropout = nn.Dropout(site_dropout)
+        self.site_chunk_size = None if site_chunk_size in (None, 0) else max(1, int(site_chunk_size))
+
+        if site_encoder_layers > 0:
+            self.sab_layers = nn.ModuleList(
+                [_SAB(site_embed_dim, site_encoder_heads, site_dropout) for _ in range(site_encoder_layers)]
+            )
+        else:
+            self.sab_layers = nn.ModuleList()
+
+        self.pma = _PMA(site_embed_dim, site_encoder_heads, site_pma_seeds, site_dropout)
+        self.output_linear = nn.Linear(site_embed_dim * site_pma_seeds, proj_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.size(-1) != self.input_dim:
+            raise ValueError("Unexpected feature dimension for site encoder")
+
+        batch = x.shape[0]
+        x = x.view(batch, self.num_sites, self.site_alphabet_size)
+
+        if self.site_chunk_size is None or batch <= self.site_chunk_size:
+            x = self.embedding(x)
+            x = self.embedding_norm(x)
+            x = self.embedding_dropout(x)
+
+            if len(self.sab_layers) > 0:
+                for layer in self.sab_layers:
+                    x = layer(x)
+
+            pooled = self.pma(x)
+            pooled = pooled.reshape(batch, -1)
+            return self.output_linear(pooled)
+
+        pooled_chunks = []
+        for chunk in torch.split(x, self.site_chunk_size, dim=0):
+            chunk = self.embedding(chunk)
+            chunk = self.embedding_norm(chunk)
+            chunk = self.embedding_dropout(chunk)
+
+            if len(self.sab_layers) > 0:
+                encoded = chunk
+                for layer in self.sab_layers:
+                    encoded = layer(encoded)
+            else:
+                encoded = chunk
+
+            pooled = self.pma(encoded)
+            pooled_chunks.append(pooled.reshape(encoded.size(0), -1))
+
+        pooled = torch.cat(pooled_chunks, dim=0)
+        return self.output_linear(pooled)
 
 
 class CellTreeQMAttention(nn.Module):
@@ -109,6 +271,8 @@ class CellTreeQMAttention(nn.Module):
         site_encoder_heads=4,
         site_encoder_layers=2,
         site_dropout=0.1,
+        site_pma_seeds=4,
+        site_chunk_size: int | None = 1,
     ):
         """
         Encoder with optional feature gating for CellTree Quartet Matching.
@@ -129,12 +293,14 @@ class CellTreeQMAttention(nn.Module):
             tau (float): Temperature parameter for Gumbel softmax.
             device (str): Device for computation.
             init_ones (bool): Whether to initialize gates to favor "on" state.
-            cell_encoder_type (str): Type of cell encoder to use ('linear', 'site_transformer', 'site_attention').
+            cell_encoder_type (str): Type of cell encoder to use ('linear', 'site_token', 'site_setpool').
             site_alphabet_size (int): Size of the site alphabet.
             site_embed_dim (int): Embedding dimension for the site encoder.
             site_encoder_heads (int): Number of attention heads for the site encoder.
             site_encoder_layers (int): Number of layers for the site encoder.
             site_dropout (float): Dropout for the site encoder.
+            site_pma_seeds (int): Number of seed vectors for set pooling.
+            site_chunk_size (int | None): Optional mini-batch size for site encoders (chunk along cell axis).
         """
         super().__init__()
         self.norm_method = norm_method
@@ -166,9 +332,10 @@ class CellTreeQMAttention(nn.Module):
         if encoder_type == "linear":
             logging.info(f"Using LinearCellEncoder")
             self.cell_encoder = LinearCellEncoder(input_dim, proj_dim)
-        elif encoder_type in {"site", "site_transformer", "site_attention"}:
-            logging.info(f"Using SiteTransformerCellEncoder")
-            self.cell_encoder = SiteTransformerCellEncoder(
+        
+        elif encoder_type == "site_token":
+            logging.info("Using SiteTokenEncoder (CLS pooling over site tokens)")
+            self.cell_encoder = SiteTokenEncoder(
                 input_dim=input_dim,
                 proj_dim=proj_dim,
                 site_alphabet_size=site_alphabet_size,
@@ -176,6 +343,20 @@ class CellTreeQMAttention(nn.Module):
                 site_encoder_heads=site_encoder_heads,
                 site_encoder_layers=site_encoder_layers,
                 site_dropout=site_dropout,
+                site_chunk_size=site_chunk_size,
+            )
+        elif encoder_type == "site_setpool":
+            logging.info(f"Using SetTransformerCellEncoder")
+            self.cell_encoder = SiteSetPoolEncoder(
+                input_dim=input_dim,
+                proj_dim=proj_dim,
+                site_alphabet_size=site_alphabet_size,
+                site_embed_dim=site_embed_dim,
+                site_encoder_heads=site_encoder_heads,
+                site_encoder_layers=site_encoder_layers,
+                site_dropout=site_dropout,
+                site_pma_seeds=site_pma_seeds,
+                site_chunk_size=site_chunk_size,
             )
         else:
             raise ValueError(f"Unknown cell_encoder_type '{cell_encoder_type}'")
@@ -228,7 +409,6 @@ class CellTreeQMAttention(nn.Module):
         if self.feature_gate is not None:
             x = self.feature_gate(x)
         elif hasattr(self, 'G'):
-            # Linear gating with learnable matrix G
             x = x @ self.G
 
         # Encode per-cell features
@@ -236,7 +416,7 @@ class CellTreeQMAttention(nn.Module):
         x = self.dropout1(x)
 
         # Transformer encoder
-        x = x.unsqueeze(1)  # Add a sequence dimension
+        x = x.unsqueeze(1)
         x = self.transformer_encoder(x)
         x = x.squeeze(1)
 
@@ -249,8 +429,10 @@ class CellTreeQMAttention(nn.Module):
 
         # Apply dropout
         x = self.dropout2(x)
+        
+        # x = torch.nn.functional.normalize(x, p=2, dim=-1)
 
         if batched:
             x = x.view(B, N, -1)
 
-        return x 
+        return x

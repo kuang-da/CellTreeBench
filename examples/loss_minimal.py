@@ -31,6 +31,8 @@ def additivity_error_quartet_tensor(
     push_margin=0.5,
     matching_mode="mismatched",
     device="cpu",
+    eps: float = 1e-8,
+    norm_for_p: bool = True,   # 新增：是否在 P-loss 内部做 stop-grad 归一化    
 ):
     """
     Compute the additivity error based on the top two summed pairwise distances.
@@ -40,6 +42,14 @@ def additivity_error_quartet_tensor(
     - 'all': All quartets.
     """
     B = dm_quartets.size(0)
+    if norm_for_p:
+        iu = torch.triu_indices(dm_quartets.size(-2), dm_quartets.size(-1), 1, device=dm_quartets.device)
+        # 估计距离的上三角均值（每个 batch 一个数），并阻断反传
+        est_mean = dm_quartets[:, iu[0], iu[1]].mean(dim=1, keepdim=True).detach().clamp_min(eps)  # (B,1)
+        ref_mean = dm_ref_quartets[:, iu[0], iu[1]].mean(dim=1, keepdim=True).detach().clamp_min(eps)
+        dm_quartets = dm_quartets / est_mean.view(B, 1, 1)
+        dm_ref_quartets = dm_ref_quartets / ref_mean.view(B, 1, 1)
+      
     # Compute sums of selected pairwise distances
     dis_sums_ref = compute_pairwise_distance_sums(dm_ref_quartets)  # Shape: (B, 3)
     dis_sums = compute_pairwise_distance_sums(dm_quartets)  # Shape: (B, 3)
@@ -69,29 +79,33 @@ def additivity_error_quartet_tensor(
         raise ValueError(
             "Invalid matching_mode. Must be 'mismatched', 'matched', or 'all'."
         )
+    # Initialize losses
+    zero = torch.tensor(0.0, device=device)
+    loss, loss_close, loss_push = zero, zero, zero
 
-    # If there are any non-matching samples, compute the loss
-    if mask.any():  # Select only the non-matching samples
+    if mask.any():
         dis_sums_nm = dis_sums[mask]  # Shape: (B_nm, 3)
         top2_idx_ref_nm = top2_idx_ref[mask]  # Shape: (B_nm, 2)
         B_nm = dis_sums_nm.size(0)
 
         # Extract the top two values based on the reference indices
-        top_2_values_est = dis_sums_nm.gather(1, top2_idx_ref_nm)
+        top2_vals = dis_sums_nm.gather(1, top2_idx_ref_nm)      # (B_nm, 2)
+        S1, S2 = top2_vals[:, 0], top2_vals[:, 1]
 
         # Identify the lowest value not in the top two
         lowest_value_idx = 3 - top2_idx_ref_nm.sum(dim=1)  # Shape: (B_nm,)
-        lowest_values = dis_sums_nm[torch.arange(B_nm), lowest_value_idx]
+        S3 = dis_sums_nm[torch.arange(B_nm, device=device), lowest_value_idx]
+
+        # 公共分母（S1 + S2），防止除 0
+        den = (S1 + S2).clamp_min(eps)
 
         # Loss to make the top two values closer (using absolute difference)
-        loss_close = torch.mean(
-            torch.abs(top_2_values_est[:, 0] - top_2_values_est[:, 1])
-        )
-
-        # Loss to push the lowest value further away with a margin
-        avg_top2 = top_2_values_est.mean(dim=1)
-        diff = (avg_top2 + push_margin) - lowest_values
-        loss_push = torch.mean(torch.relu(-diff))
+        # close:  |S1 - S2| / (S1 + S2)
+        loss_close = torch.mean(torch.abs(S1 - S2) / den)
+        # push:   max(0, margin - (S1 + S2 - 2*S3)/(S1 + S2))
+        gap_ratio = (S1 + S2 - 2.0 * S3) / den                  # ∈ (-∞, 1]
+        margin_ratio = torch.as_tensor(push_margin, dtype=dis_sums.dtype, device=device)
+        loss_push = torch.mean(torch.relu(margin_ratio - gap_ratio))
 
         # Total loss
         loss = weight_close * loss_close + weight_push * loss_push

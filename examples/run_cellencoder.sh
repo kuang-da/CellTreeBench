@@ -1,3 +1,5 @@
-#!/bin/bash
-timestamp=$(date +"%Y%m%d_%H%M%S")
-python /workspaces/CellTreeBench-Phylo/examples/train_phylogenetic_cellencoder.py > /workspaces/CellTreeBench-Phylo/examples/logs/exp_${timestamp}.log 2>&1
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/scripts/run_cellencoder.sh" "$@"
