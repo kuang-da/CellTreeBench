@@ -16,6 +16,10 @@ import torch.optim as optim
 import numpy as np
 import argparse
 from dotenv import load_dotenv
+from ruamel.yaml import YAML
+import argparse 
+
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -169,16 +173,16 @@ def train_one_epoch(
     dm_ref = [ref_dm.unsqueeze(0).to(device) for ref_dm in train_dataset.ref_dm]
 
     # Training configuration
-    batch_size = config["batch_size"]  # Number of quartets to sample per step
-    eval_interval = config["eval_interval"]
-    weight_D = config["weight_D"]
-    weight_P = config["weight_P"]
-    weight_close = config["weight_close"]
-    weight_push = config["weight_push"]
-    push_margin = config["push_margin"]
-    dist_metric = config["metric"]
-    metric_loss_type = config["metric_loss"]
-    distance_alpha = config.get("distance_error_alpha", 0.5)
+    batch_size = config["training"]["batch_size"]  # Number of quartets to sample per step
+    eval_interval = config["training"]["eval_interval"]
+    weight_D = config["training"]["weight_D"]
+    weight_P = config["training"]["weight_P"]
+    weight_close = config["training"]["weight_close"]
+    weight_push = config["training"]["weight_push"]
+    push_margin = config["training"]["push_margin"]
+    dist_metric = config["training"]["metric"]
+    metric_loss_type = config["training"]["metric_loss"]
+    distance_alpha = config["training"].get("distance_error_alpha", 0.5)
 
     # Calculate max_step like in research codebase
     max_step = len(train_dataset) // batch_size if batch_size > 0 else 1
@@ -285,7 +289,7 @@ def train_one_epoch(
         if hasattr(model, "feature_gate") and model.feature_gate is not None:
             gate_loss = model.feature_gate.compute_penalty(
                 penalty_type="sparsity",
-                lambda_penalty=config.get("weight_gate", 0.0),
+                lambda_penalty=config["training"].get("weight_gate", 0.0),
             )
 
         # Total loss
@@ -410,7 +414,7 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
         for i, get_node_mtx in enumerate(dataset.get_node_mtx()):
             # Get embeddings and distance matrix
             embeddings, emb_dm, node_names = check_embedding(
-                get_node_mtx, model, config["metric"], device
+                get_node_mtx, model, config["model"]["metric"], device
             )
 
                 # Reconstruct tree from embedding
@@ -445,7 +449,7 @@ def evaluate_model(model, dataset, config, device="cpu", dataset_name="train", g
                 .to(device)
                 )
             trans_pts_mtx = model(pts_mtx)
-            dm = pairwise_distances(trans_pts_mtx, metric=config["metric"]).to(device)
+            dm = pairwise_distances(trans_pts_mtx, metric=config["model"]["metric"]).to(device)
             dm_ref = dataset.ref_dm[i].unsqueeze(0).to(device)
 
             # Generate quartets for evaluation
@@ -566,68 +570,57 @@ def main():
     setup_logging()
     logging.info("Starting CellTreeQMAttention training on Phylogenetic dataset")
     # Configuration
-    config = {
-        # Random Seed
-        "seed": 42,
-        # Dataset
-        "dataset_name": "phylogenetic/200tips", # where to find data (parent directory of both train and test if using pre-split data)
-        "dataset_names": {"train":0.5, "test":0.5}, #datasets to generate. Also can include split proportions if autosplit is enabled (but be careful because uneven splits may cause zero padding)
-        "tree_directory": "trees", # where to find trees (within dataset directory)
-        "msa_directory": "msas", # where to find MSAs (within dataset directory)
-        "autosplit": "sites", # Autosplit the data into datasets (if None each dataset name will be assumed to be a directory) (Options: None, sites, leaves)
-        "lineage_name": None,
-        "base_dir": celltreebench_path,
-        # Training
-        "lr": 0.0001,
-        "weight_decay": 0.001,
-        "weight_D": 5, # 6.0, 4.0, 1.0
-        "weight_P": 200.0,
-        "weight_close": 1.0,
-        "weight_push": 30.0,
-        "push_margin": 0.1,
-        "distance_error_alpha": 0.3,
-        "batch_size": 8_192,  # Reduced from 2048 for high-dimensional data
-        "num_epochs": 60,
-        "eval_interval": 1000,
-        "weight_gate": -1.0,  # Disabled
-        # Model
-        "metric": "euclidean",
-        "metric_loss": "additivity",  # Can be "additivity", "triplet", or "quadruplet"
-        # Device
-        "device": "cuda:0" if torch.cuda.is_available() else "cpu",
-        
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=str,
+        default="configs/basic.yaml",
+        help="Path to the config file.",
+    )
+    args = parser.parse_args()
+    yaml = YAML(typ="safe")
+    config_file = args.config
+    with open(config_file, 'r') as f:
+        config = yaml.load(f)
+    base_dir = config["dataset"]["base_dir"] or celltreebench_path
+    device = torch.device(config["general"]["device"] or "cuda:0" if torch.cuda.is_available() else "cpu")
 
-    }
+    logging.info(f"Config File: {config_file}")
     logging.info(f"Config: {config}")
     results = {
         "epoch_avg_loss": [],
         "all_evaluations": [],  # Store all evaluation results from all epochs
         "base_eval_avg": {}, # store average base evaluations (NOTE: formatted differently than all_evaluations)
+        "config_file": config_file,
         "config": config # store config for later reference
     }
 
-    device = torch.device(config["device"])
     logging.info(f"Using device: {device}")
-    gen = torch.Generator().manual_seed(config["seed"])  # Set seed for reproducibility
-    torch.manual_seed(config["seed"])  # Set global seed for reproducibility
-    # gen = None
+    
+    if seed := config["general"]["seed"]:
+        gen = torch.Generator().manual_seed(seed)  # Set seed for reproducibility
+        torch.manual_seed(seed)  # Set global seed for reproducibility
+    else:
+        gen = None
 
     # Load dataset
-    logging.info(f"Loading {config['dataset_name']} dataset...")
-    data_dir = f"{config['base_dir']}/data/"
-    out_dir = f"{config['base_dir']}/examples/out/phylogenetic_{config['dataset_name']}"
+    dataset_name=config["dataset"]['dataset_name']
+    logging.info(f"Loading {dataset_name} dataset...")
+    data_dir = f"{base_dir}/data/"
+    out_dir = f"{base_dir}/examples/out/phylogenetic_{dataset_name}"
 
     os.makedirs(out_dir, exist_ok=True)
 
-    dataset_name=config["dataset_name"]
+    
 
     datasets = PhyloDatasetCreator(
         dataset_name,
-        dataset_names=config["dataset_names"],
+        dataset_names=config["dataset"]["dataset_names"],
         data_dir=data_dir,
-        tree_directory=config["tree_directory"],
-        msa_directory=config["msa_directory"],
-        autosplit=config["autosplit"],
+        tree_directory=config["dataset"]["tree_directory"],
+        msa_directory=config["dataset"]["msa_directory"],
+        autosplit=config["dataset"]["autosplit"],
         seed=torch.randint(0, 100_000_000_000, (1,), generator=gen).item()
     )
     datasets_dict = datasets.get_dataset(datasets=["train", "test"])
@@ -638,7 +631,7 @@ def main():
     results["data"] = {name: [{"leaves": node_mtx["node_mtx"].shape[0], "amino_acids": node_mtx["node_mtx"].shape[1]/22} for node_mtx in dataset.get_node_mtx()] for name, dataset in datasets_dict.items()}
     
     # Evaluate the datasets on basic NJ
-    _, avg_NJ_evals = evaluate_base(datasets_dict, evals=1, dist_metric=config["metric"], device=device, gen=gen, eval_type="basic NJ")
+    _, avg_NJ_evals = evaluate_base(datasets_dict, evals=1, dist_metric=config["model"]["metric"], device=device, gen=gen, eval_type="basic NJ")
 
     logging.info(
                     f"Base evaluations: "
@@ -655,8 +648,8 @@ def main():
     
 
     # Evaluate the datasets on random shuffle and embedding
-    _, avg_random_shuffled_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["metric"], device=device, gen=gen, eval_type="shuffle")
-    _, avg_random_embedding_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["metric"], device=device, gen=gen, eval_type="embedding")
+    _, avg_random_shuffled_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["model"]["metric"], device=device, gen=gen, eval_type="shuffle")
+    _, avg_random_embedding_evals = evaluate_base(datasets_dict, evals = 3, dist_metric=config["model"]["metric"], device=device, gen=gen, eval_type="embedding")
 
     # Log averages of random shuffle and random embedding evaluations
     logging.info(
@@ -708,7 +701,7 @@ def main():
 
     # Setup optimizer
     optimizer = optim.AdamW(
-        model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
+        model.parameters(), lr=config["training"]["lr"], weight_decay=config["training"]["weight_decay"]
     )
 
 
@@ -738,8 +731,8 @@ def main():
 
     start_time = time.time()
 
-    
-    for epoch in range(config["num_epochs"]):
+
+    for epoch in range(config["training"]["num_epochs"]):
         epoch_start = time.time()
 
         # Train one epoch (handles multiple steps and evaluations internally)
@@ -769,7 +762,7 @@ def main():
 
         epoch_time = time.time() - epoch_start
         logging.info(
-            f"Epoch {epoch + 1}/{config['num_epochs']} completed | "
+            f"Epoch {epoch + 1}/{config['training']['num_epochs']} completed | "
             f"Avg Loss: {epoch_results['avg_loss']:.4f} | "
             f"Steps: {epoch_results['max_step']} | "
             f"Evaluations: {len(epoch_results['step_metrics']['evaluations'])} | "
@@ -801,12 +794,12 @@ def main():
     print("\n" + "=" * 60)
     print("TRAINING SUMMARY")
     print("=" * 60)
-    print(f"Dataset: {config['dataset_name']} ({config['lineage_name']})")
+    print(f"Dataset: {config['dataset']['dataset_name']} ({config['dataset']['lineage_name']})")
     print(f"Model: CellTreeQMAttention")
     print(f"Input dimensions: {input_dim}")
     print(f"Total parameters: {total_params:,}")
-    print(f"Training epochs: {config['num_epochs']}")
-    print(f"Batch size (quartets): {config['batch_size']}")
+    print(f"Training epochs: {config['training']['num_epochs']}")
+    print(f"Batch size (quartets): {config['training']['batch_size']}")
     print(f"Total evaluations: {len(results['all_evaluations'])}")
     print(f"Best test RF distance: {best_rf:.4f} at Epoch {best_epoch}, Step {best_step}")
     if final_eval:

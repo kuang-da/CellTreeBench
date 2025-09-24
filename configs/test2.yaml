@@ -1,0 +1,27 @@
+general: 
+    device: 
+    seed: 42
+dataset: 
+    dataset_name: "phylogenetic/200tips"  # where to find data (parent directory of both train and test if using pre-split data)
+    dataset_names: {"train": 0.5, "test": 0.5}  # datasets to generate. Also can include split proportions if autosplit is enabled (but be careful because uneven splits may cause zero padding)
+    tree_directory: "trees"  # where to find trees (within dataset directory)
+    msa_directory: "500sites/msas"  # where to find MSAs (within dataset directory)
+    autosplit: "sites" # Autosplit the data into datasets (if None each dataset name will be assumed to be a directory) (Options: None, sites, leaves)
+    lineage_name:
+    base_dir:
+training: 
+    lr: 0.0001
+    weight_decay: 0.001
+    weight_D: 5  # 6.0, 4.0, 1.0
+    weight_P: 200.0
+    weight_close: 1.0
+    weight_push: 30.0
+    push_margin: 0.1
+    distance_error_alpha: 0.3
+    batch_size: 8192  # Reduced from 2048 for high-dimensional data
+    num_epochs: 30
+    eval_interval: 1000
+    weight_gate: -1.0  # Disabled
+model: 
+    metric: "euclidean"
+    metric_loss": "additivity"  # Can be "additivity", "triplet", or "quadruplet"

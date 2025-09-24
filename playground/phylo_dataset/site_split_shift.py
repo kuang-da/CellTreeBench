@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset",
-        default="phylogenetic/200tips",
+        default="phylogenetic/200tips_500sites",
         help="Relative dataset path under data/ (default: %(default)s)",
     )
     parser.add_argument(
