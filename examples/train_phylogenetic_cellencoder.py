@@ -220,6 +220,38 @@ def evaluate_model(model, dataset, cfg, device="cpu", dataset_name="train", gen=
     model.eval()
     dist_metric = cfg["loss"]["metric"]
 
+    # ---- Multi-View（可选）配置 ----
+    eval_cfg = cfg.get("evaluation", {}) or {}
+    mv_on   = bool(eval_cfg.get("multiview", False))
+    mv_K    = int(eval_cfg.get("views", 4))
+    mv_keep = float(eval_cfg.get("keep_ratio", 0.5))
+    alphabet_size = int(cfg["model"].get("site_alphabet_size", 22))
+
+    def _subsample_sites(x, keep_ratio):
+        # x: [1, N, F]，F = S * alphabet_size
+        B, N, F = x.shape
+        if alphabet_size <= 0 or (F % alphabet_size != 0):
+            return x  # 维度不匹配时回退
+        S = F // alphabet_size
+        K = max(1, int(round(S * keep_ratio)))
+        perm_device = x.device
+        if gen is not None:
+            gen_device = getattr(gen, "device", None)
+            if gen_device is not None:
+                gen_device = torch.device(gen_device)
+                if gen_device != perm_device:
+                    idx_sites = torch.randperm(S, generator=gen, device=gen_device)[:K]
+                    idx_sites = idx_sites.to(perm_device, non_blocking=True)
+                else:
+                    idx_sites = torch.randperm(S, generator=gen, device=perm_device)[:K]
+            else:
+                idx_sites = torch.randperm(S, generator=gen, device=perm_device)[:K]
+        else:
+            idx_sites = torch.randperm(S, device=perm_device)[:K]
+        base = torch.arange(alphabet_size, device=x.device)
+        feat_idx = torch.cat([s * alphabet_size + base for s in idx_sites], dim=0)
+        return x.index_select(2, feat_idx)
+    
     with torch.no_grad():
         eval_results = {
             f"rf_{dataset_name}": [],
@@ -234,15 +266,30 @@ def evaluate_model(model, dataset, cfg, device="cpu", dataset_name="train", gen=
         ref_dm_batches = dataset.get_ref_distance_matrices(device=device, add_batch_dim=True)
 
         for i, node_tensor in enumerate(node_tensors):
-            embeddings, emb_dm, node_names = check_embedding(
-                node_tensor, node_name_lists[i], model, dist_metric, device
-            )
-
-            emb_tree = reconstruct_from_dm(emb_dm, node_names, method="nj")
-            emb_topo_res = dataset.compare_trees(emb_tree, i, ref_tree="topology_tree")
-
-            emb_flat = embeddings.squeeze(0).detach().cpu()
-            emb_norm_mean = emb_flat.norm(dim=-1).mean().item()
+            node_names = node_name_lists[i]  # 提前统一
+            
+            if mv_on:
+                # ---- 多视角：平均距离矩阵 ----
+                dm_list = []
+                for _ in range(mv_K):
+                    xk = _subsample_sites(node_tensor, mv_keep)
+                    zk = model(xk)
+                    dk = pairwise_distances(zk, metric=dist_metric).to(device)  # [1, N, N]
+                    dm_list.append(dk)
+                dm = torch.stack(dm_list, dim=0).mean(0)               # [1, N, N]
+                emb_dm = dm.squeeze(0).cpu().numpy()
+                # 为了日志，额外做一次“全列”前向取范数均值（不影响评估用 dm）
+                emb_norm_mean = model(node_tensor).squeeze(0).norm(dim=-1).mean().item()  # 仅用于日志
+            else:
+                    # ---- 原路径：一次性全列 ----            
+                embeddings, emb_dm, _ = check_embedding(
+                    node_tensor, node_name_lists[i], model, dist_metric, device
+                )
+                dm = pairwise_distances(embeddings, metric=dist_metric).to(device)
+                emb_flat = embeddings.squeeze(0).detach().cpu()
+                emb_norm_mean = emb_flat.norm(dim=-1).mean().item()
+            
+            # 统计/日志
             dist_vals = emb_dm[np.triu_indices_from(emb_dm, k=1)]
             if dist_vals.size > 0:
                 dist_mean = float(dist_vals.mean())
@@ -255,16 +302,18 @@ def evaluate_model(model, dataset, cfg, device="cpu", dataset_name="train", gen=
                     f"dist_min={dist_min:.4f}, dist_max={dist_max:.4f}"
                 )
 
+            # NJ 与四点评估
+            emb_tree = reconstruct_from_dm(emb_dm, node_names, method="nj")
+            emb_topo_res = dataset.compare_trees(emb_tree, i, ref_tree="topology_tree")
+            
             eval_results[f"split_prop_common_{dataset_name}"].append(
                 avg_edge_split_proportion(emb_topo_res["common_edges"])
             )
             eval_results[f"split_prop_ref_{dataset_name}"].append(
                 avg_edge_split_proportion(emb_topo_res["ref_edges"])
             )
-
-            dm = pairwise_distances(embeddings, metric=dist_metric).to(device)
+            
             dm_ref = ref_dm_batches[i]
-
             dm_quartets, dm_ref_quartets = generate_quartets_tensor(
                 batch_size=100000,
                 dm=dm,
@@ -276,7 +325,8 @@ def evaluate_model(model, dataset, cfg, device="cpu", dataset_name="train", gen=
             eval_results[f"rf_{dataset_name}"].append(emb_topo_res["rf"])
             eval_results[f"rf_max_{dataset_name}"].append(emb_topo_res["max_rf"])
             eval_results[f"quartet_dist_{dataset_name}"].append(quartet_dist.item())
-
+        
+        # Collect average metrics
         eval_results[f"split_prop_common_{dataset_name}"] = sum(
             eval_results[f"split_prop_common_{dataset_name}"]
         ) / len(eval_results[f"split_prop_common_{dataset_name}"])
@@ -394,12 +444,22 @@ def train_one_epoch(
     # Unpack config
     tr = cfg["training"]
     ls = cfg["loss"]
+    md = cfg["model"]
+
     batch_size = int(tr["batch_size"])                 # quartets per step
     eval_interval = int(tr["eval_interval"])
     base_lr        = float(tr["lr"])
     warmup_steps   = int(tr.get("warmup_steps", 0))
     max_grad_norm  = float(tr.get("grad_clip", 1.0))    
-    
+
+    # Two view related
+    keep_ratio      = float(tr.get("site_consistency_keep_ratio", 0.5))  # 每个视角保留列比例
+    lambda_cons     = float(ls.get("consistency_weight", 0.5))           # 一致性权重
+    alphabet_size   = int(md.get("site_alphabet_size", 22))
+    min_sites       = int(md.get("site_pma_seeds", 1))                   # 至少保留这么多 site，防止过少
+    keep_ratio      = max(0.05, min(0.95, keep_ratio))                   # 合理剪裁    
+
+    # Loss related
     weight_D = float(ls["weight_D"])
     weight_P_base = float(ls["weight_P"])                 # 基准的（可被自适应修正）
     weight_close = float(ls["weight_close"])
@@ -410,6 +470,7 @@ def train_one_epoch(
     distance_alpha = float(ls.get("distance_error_alpha", 0.5))
     weight_gate = float(ls.get("weight_gate", 0.0))
     distance_align = ls.get("D_align", "scale")
+    lambda_scale = float(ls.get("scale_anchor", 0.05))
     
     # 自适应配重相关（把 EMA 状态挂在 model 上，跨 epoch 复用）
     adaptive_P        = bool(ls.get("adaptive_P", True))
@@ -429,8 +490,40 @@ def train_one_epoch(
         model._adaptive_p_state["wP_base"]     = weight_P_base
         model._adaptive_p_state["target_ratio"] = target_ratio
     
+    # -------- Helper：按“site”为单位子采样列 ----------
+    def _subsample_sites(batch_x, keep_ratio_local: float):
+        """
+        batch_x: [B=1, N_tips, F]，其中 F=sites * alphabet_size
+        返回：x_sub (同设备)、若无法整除则回退为原输入
+        """
+        B, N, F = batch_x.shape
+        if alphabet_size <= 0 or (F % alphabet_size != 0):
+            # 不能整除，放弃子采样（保证稳健）
+            return batch_x
+        S = F // alphabet_size
+        K = max(min_sites, int(round(S * keep_ratio_local)))
+        K = min(S, max(1, K))
+
+        # 采样 site 索引
+        idx_sites = torch.randperm(S, generator=gen)[:K].to(batch_x.device)
+        # 将每个 site 展开为 alphabet_size 个连续特征列
+        base = torch.arange(alphabet_size, device=batch_x.device)
+        feat_idx = torch.cat([s * alphabet_size + base for s in idx_sites], dim=0)  # [K*alphabet]
+        # 在特征维度上选取
+        return batch_x.index_select(dim=2, index=feat_idx)
+
+    # -------- Helper：其他小工具 ----------
+    def _pairwise_dm(emb):
+        return pairwise_distances(emb, metric=dist_metric).to(device)
+
+    def _zscore(M):
+        mu = M.mean()
+        sigma = M.std().clamp_min(1e-6)
+        return (M - mu) / sigma
+        
     # Calculate max_step like in research codebase
     max_step = len(train_dataset) // batch_size if batch_size > 0 else 1
+    
     # Initialize metrics for this epoch
     epoch_metrics = {
         "losses": [],
@@ -444,7 +537,6 @@ def train_one_epoch(
         "diag_active_rate": [],
         "diag_gap_mean": [],
     }
-
     running_loss = 0.0
 
     # Multiple training steps per epoch (the unconventional part!)
@@ -459,37 +551,33 @@ def train_one_epoch(
                 g["lr"] = new_lr        
         
         optimizer.zero_grad()
+        # === Two-View：对同一批输入独立采两份 site 子集 ===
+        x_full = node_batches[0]  # 与原版一致：每步都用同一个 tree batch
+        x_a = _subsample_sites(x_full, keep_ratio)
+        x_b = _subsample_sites(x_full, keep_ratio)
         
-        # Process each tree's quartet
-        # Always process the FULL dataset (same tensor every step) (for each tree)
-        trans_pts_mtx = model(node_batches[0])
+        # 两次前向
+        z_a = model(x_a)   # [1, N, D]
+        z_b = model(x_b)   # [1, N, D]
 
-        # # 1. Distance Error Loss (L_D) - on full dataset for the first tree
-        # batch_D = distance_error(
-        #     node_batches[0],
-        #     trans_pts_mtx,
-        #     diff_norm=1,
-        #     dist_metric=dist_metric,
-        #     alpha=distance_alpha,
-        #     align=distance_align,
-        # )
-
-        # # 2. Quartet/Metric Loss (L_P) - sample DIFFERENT quartets each step
-        # dm = pairwise_distances(trans_pts_mtx, metric=dist_metric).to(device)
-        
-        # 1) 当前嵌入的成对距离矩阵（后面 D/P 复用这一份）
-        dm = pairwise_distances(trans_pts_mtx, metric=dist_metric).to(device)
-        # 1'. Distance Error：直接对齐“参考树距离矩阵”
+        # 两个视角的距离矩阵 + 均值融合
+        dm_a = _pairwise_dm(z_a)  # [1, N, N]
+        dm_b = _pairwise_dm(z_b)  # [1, N, N]
+        z_full = model(x_full)
+        dm_full = pairwise_distances(z_full, metric=dist_metric).to(device)       
+        dm_est  = (dm_full + dm_a + dm_b) / 3.0
+        # 1) D-loss：估计距离 vs 参考树距离
         batch_D = distance_error_from_dm(
-            dm_est=dm,
+            dm_est=dm_est,
             dm_ref=ref_dm_batches[0],   # 注意这里是 ref_dm，不是原始输入特征
             diff_norm=1,
             alpha=distance_alpha,
             align=distance_align,
         )        
+        # 2) P-loss：在 dm_est 上采样四元组并计算 additivity / triplet / quadruplet        
         dm_quartets, dm_ref_quartets = generate_quartets_tensor(
             batch_size=batch_size,  # Number of quartets to sample
-            dm=dm,
+            dm=dm_est,
             dm_ref=ref_dm_batches[0],
             device=device,
             seed=int(torch.randint(0, 100_000_000_000, (1,), generator=gen)),
@@ -508,7 +596,8 @@ def train_one_epoch(
                 weight_close=weight_close,
                 weight_push=weight_push,
                 push_margin=push_margin_eff,
-                matching_mode = "all" if global_step < max(1000, 0.5*max_step) else "mismatched",
+                matching_mode = "all",
+                # matching_mode = "all" if global_step < max(1000, 0.5*max_step) else "mismatched",
                 device=device,
             )
         
@@ -534,8 +623,19 @@ def train_one_epoch(
             batch_P_push = torch.tensor(0.0, device=device)
         else:
             raise ValueError(f"Invalid metric loss: {metric_loss_type}")
+        
+        # 3) Two-View 一致性损失：距离矩阵在换列子集时应稳定
+        if lambda_cons > 0.0:
+            # L_cons = torch.nn.functional.mse_loss(_zscore(dm_a), _zscore(dm_b))
+            va = _triu_vector(dm_a)  # (N*(N-1)/2,)
+            vb = _triu_vector(dm_b)
+            va = (va - va.mean()) / va.std().clamp_min(1e-8)
+            vb = (vb - vb.mean()) / vb.std().clamp_min(1e-8)
+            L_cons = torch.mean((va - vb) ** 2)            
+        else:
+            L_cons = torch.tensor(0.0, device=device)
 
-        # 3. Feature Gate Loss (if applicable)
+        # 4. Feature Gate Loss (if applicable)
         gate_loss = torch.tensor(0.0, device=device)
         if hasattr(model, "feature_gate") and model.feature_gate is not None:
             gate_loss = model.feature_gate.compute_penalty(
@@ -552,7 +652,7 @@ def train_one_epoch(
                 # weight_P_eff = st["wP_base"] * (st["target_ratio"] * st["ema_D"] / st["ema_P"]).clamp(0.1, 3.0)
                 raw_scale = st["target_ratio"] * (st["ema_D"] / (st["ema_P"] + 1e-8))
                 # 收紧上限，防止 P 盖过 D；建议先 1.2，也可以先做 1.0 做对照
-                weight_P_eff = st["wP_base"] * raw_scale.clamp(0.3, 1.2)                
+                weight_P_eff = st["wP_base"] * raw_scale.clamp(0.3, 0.6)                
                 warmup_P = int(tr.get("p_warmup_steps", 500))
                 if warmup_P > 0:
                     scale = min(1.0, global_step / warmup_P)
@@ -560,8 +660,28 @@ def train_one_epoch(
         else:
             weight_P_eff = torch.as_tensor(weight_P_base, device=device)
 
+        # NEW: Scale anchor（不要放在 no_grad 里）
+        if lambda_scale > 0.0:
+            v_est = _triu_vector(dm_est)               # 上三角展开（与 diag 中一致）
+            v_ref = _triu_vector(ref_dm_batches[0])    # 参考距离（不参与梯度）
+            s_num = (v_est * v_ref).sum()
+            s_den = (v_est * v_est).sum().clamp_min(1e-8)
+            scale_s = s_num / s_den                    # 与 D_align='scale' 同源的最优缩放
+            scale_penalty = (scale_s - 1.0).pow(2)     # 约束尺度靠近 1
+        else:
+            scale_penalty = torch.tensor(0.0, device=device)
+
+        # Total loss（加入尺度锚）
+        total_loss = (
+            weight_D * batch_D
+            + weight_P_eff * batch_P
+            + lambda_cons * L_cons
+            + gate_loss
+            + lambda_scale * scale_penalty            # NEW
+        )
+
         # Total loss
-        total_loss = weight_D * batch_D + weight_P_eff * batch_P + gate_loss
+        # total_loss = weight_D * batch_D + weight_P_eff * batch_P + lambda_cons * L_cons + gate_loss
         running_loss += total_loss.item()
 
         # Backward pass
@@ -599,24 +719,22 @@ def train_one_epoch(
                 else:
                     mismatch_rate = float("nan"); active_rate = float("nan"); gap_mean = float("nan")
             
-            with torch.no_grad():
-                dm_est_raw = dm
-                dm_ref_raw = ref_dm_batches[0]
-                v_est = _triu_vector(dm_est_raw)
-                v_ref = _triu_vector(dm_ref_raw)
+                v_est = _triu_vector(dm_est)
+                v_ref = _triu_vector(ref_dm_batches[0])
                 s_num = (v_est * v_ref).sum()
                 s_den = (v_est * v_est).sum().clamp_min(1e-8)
                 scale_s = (s_num / s_den).item()
             
-            lr_now = optimizer.param_groups[0]["lr"]
-            logging.info(
-                f"[diag] gstep={global_step} | lr={lr_now:.2e} | "
-                f"wP_eff={float(weight_P_eff):.3f} (base={weight_P_base:.3f}, raw×base={float(st['wP_base']*raw_scale):.3f}) | "
-                f"D={batch_D.item():.3f} | P={batch_P.item():.3f} | "
-                f"P_close={batch_P_close.item():.3f} | P_push={batch_P_push.item():.3f} | "
-                f"mm={mismatch_rate:.3f} | act={active_rate:.3f} | gap={gap_mean:.4f} | "
-                f"margin={push_margin_eff:.3f} | scale_ref={scale_s:.4f}"            
-            )
+                lr_now = optimizer.param_groups[0]["lr"]
+                logging.info(
+                    f"[diag] gstep={global_step} | lr={lr_now:.2e} | "
+                    f"wP_eff={float(weight_P_eff):.3f} (base={weight_P_base:.3f}, raw×base={float(model._adaptive_p_state['wP_base']*raw_scale):.3f}) | "
+                    f"D={batch_D.item():.3f} | P={batch_P.item():.3f} | cons={L_cons.item():.3f} | "
+                    f"P_close={batch_P_close.item():.3f} | P_push={batch_P_push.item():.3f} | "
+                    f"mm={mismatch_rate:.3f} | act={active_rate:.3f} | gap={gap_mean:.4f} | "
+                    f"margin={push_margin_eff:.3f} | scale_ref={scale_s:.4f} | "
+                    f"sanch={float(scale_penalty):.4e}" 
+                )
                     
         # Store step metrics
         epoch_metrics["losses"].append(total_loss.item())

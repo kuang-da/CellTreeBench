@@ -71,11 +71,22 @@ class SiteTokenEncoder(BaseCellEncoder):
         self.site_chunk_size = None if site_chunk_size in (None, 0) else max(1, int(site_chunk_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.size(-1) != self.input_dim:
-            raise ValueError("Unexpected feature dimension for site encoder")
+        feature_dim = x.size(-1)
+        if feature_dim > self.input_dim:
+            raise ValueError(
+                f"Site encoder received {feature_dim} features (> configured {self.input_dim})"
+            )
+        if feature_dim % self.site_alphabet_size != 0:
+            raise ValueError(
+                f"Site encoder feature dim {feature_dim} not divisible by alphabet size {self.site_alphabet_size}"
+            )
 
         batch = x.shape[0]
-        x = x.view(batch, self.num_sites, self.site_alphabet_size)
+        num_sites = feature_dim // self.site_alphabet_size
+        if num_sites == 0:
+            raise ValueError("Site encoder requires at least one site")
+
+        x = x.view(batch, num_sites, self.site_alphabet_size)
 
         if self.site_chunk_size is None or batch <= self.site_chunk_size:
             x = self.embedding(x)
@@ -208,11 +219,22 @@ class SiteSetPoolEncoder(BaseCellEncoder):
         self.output_linear = nn.Linear(site_embed_dim * site_pma_seeds, proj_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.size(-1) != self.input_dim:
-            raise ValueError("Unexpected feature dimension for site encoder")
+        feature_dim = x.size(-1)
+        if feature_dim > self.input_dim:
+            raise ValueError(
+                f"Site encoder received {feature_dim} features (> configured {self.input_dim})"
+            )
+        if feature_dim % self.site_alphabet_size != 0:
+            raise ValueError(
+                f"Site encoder feature dim {feature_dim} not divisible by alphabet size {self.site_alphabet_size}"
+            )
 
         batch = x.shape[0]
-        x = x.view(batch, self.num_sites, self.site_alphabet_size)
+        num_sites = feature_dim // self.site_alphabet_size
+        if num_sites == 0:
+            raise ValueError("Site encoder requires at least one site")
+
+        x = x.view(batch, num_sites, self.site_alphabet_size)
 
         if self.site_chunk_size is None or batch <= self.site_chunk_size:
             x = self.embedding(x)

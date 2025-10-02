@@ -16,23 +16,30 @@ training:
   eval_interval: 300
   warmup_steps: 500
   grad_clip: 1.0
-  p_warmup_steps: 500
+  p_warmup_steps: 2000
+  site_consistency_keep_ratio: 0.5
+
+evaluation:
+  multiview: true
+  views: 4
+  keep_ratio: 0.5
 
 loss:
   weight_gate: -1.0
   weight_decay: 0.0001
   weight_D: 1
-  weight_P: 10.0
+  weight_P: 6.0
   weight_close: 1.0
   weight_push: 5.0
   push_margin: 0.1
   distance_error_alpha: 0.75
   D_align: scale  
   adaptive_P: true
-  adaptive_P_ema: 0.9
-  adaptive_P_target_ratio: 0.5
-  p_warmup_steps: 500
-  
+  adaptive_P_ema: 0.95
+  adaptive_P_target_ratio: 0.4
+  consistency_weight: 1.5
+  scale_anchor: 0.05   # 可在 0.02–0.1 间试
+
 model:
   metric: euclidean
   metric_loss: additivity
