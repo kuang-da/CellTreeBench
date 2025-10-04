@@ -45,6 +45,9 @@ from quartet_utils_minimal import (
 from celltreeqm_attention import CellTreeQMAttention
 
 from celltreebench.datasets.phylo_dataset_creator import PhyloDatasetCreator
+from celltreebench.losses.d_loss import pairwise_l2sq_regression
+from celltreebench.safety.scale_sentry import ScaleSentry, ScaleSentryConfig
+from celltreebench.init.mds import classical_mds
 
 
 # ==== Argparse ======================================================
@@ -73,41 +76,83 @@ def default_config():
         "training": {
             "seed": 42,
             "lr": 1e-4,
-            "weight_decay": 1e-3,
-            "batch_size": 8192,          # number of quartets per step
-            "num_epochs": 60,
-            "eval_interval": 1000,
+            "weight_decay": 5.0e-5,
+            "batch_size": 4096,          # number of quartets per step
+            "num_epochs": 20,
+            "eval_interval": 300,
+            "warmup_steps": 500,
+            "p_warmup_steps": 2000,
+            "grad_clip": 1.0,
+            "multiview": False,
+            "pair_sampling": {
+                "mode": "bucket_equal",
+                "bins": 10,
+                "long_pair_boost": 1.5,
+            },
             "device": "cuda:0" if torch.cuda.is_available() else "cpu",
         },
         "loss": {
             "metric": "euclidean",
             "metric_loss": "additivity",   # additivity | triplet | quadruplet
-            "weight_D": 0.05,
-            "weight_P": 10.0,
+            "weight_D": 1.0,
+            "weight_P": 6.0,
             "weight_close": 1.0,
-            "weight_push": 1.0,
-            "push_margin": 0.1,
-            "distance_error_alpha": 1.0,
+            "weight_push": 5.0,
+            "push_margin": 0.10,
+            "distance_error_alpha": 0.75,
             "weight_gate": -1.0,
+            # D-loss (l2sq regression)
+            "D_align": "affine",
+            "d_loss": "l2sq_huber",
+            "huber_delta": 0.05,
+            "scale_anchor": 0.05,
+            # P-adaptive
+            "adaptive_P": True,
+            "adaptive_P_ema": 0.95,
+            "adaptive_P_target_ratio": 0.4,
+            "adaptive_P_cap_max": 1.0,
+            "cap_by_act": True,
+            "cap_by_act_floor": 0.6,
+            # Consistency
+            "consistency_weight": 0.3,
+            "consistency_weight_target": 1.2,
         },
         "model": {
             "proj_dim": 512,
-            "output_dim": 128,
+            "output_dim": 256,
             "hidden_dim": 512,
             "num_heads": 2,
-            "num_layers": 4,
-            "dropout_data": 0.2,
-            "dropout_metric": 0.2,
-            "norm_method": None,
+            "num_layers": 2,
+            "dropout_data": 0.0,
+            "dropout_metric": 0.05,
+            "norm_method": "pre_ln",
             "gate_type": "none",
             # encoder
             "cell_encoder_type": "site_transformer",
             "site_alphabet_size": 22,
-            "site_embed_dim": 128,
+            "site_embed_dim": 32,
             "site_encoder_heads": 4,
-            "site_encoder_layers": 2,
+            "site_encoder_layers": 1,
             "site_dropout": 0.1,
-            "site_chunk_size": 32,
+            "site_pma_seeds": 8,
+            "site_chunk_size": 1,
+            "init_mode": "random",
+        },
+        "schedule": {
+            "phaseA_steps": 1500,
+            "phaseB_ramp_steps": 2000,
+        },
+        "scale_safety": {
+            "sentry_enabled": True,
+            "threshold": 0.25,
+            "window_steps": 50,
+            "grad_clip_during_sentry": 0.5,
+            "p_weight_drop_on_sentry": 0.2,
+        },
+        "evaluation": {
+            "nj_from_embedding": True,
+            "report_bins": True,
+            "save_plots": True,
         },
     }
 
@@ -471,7 +516,15 @@ def train_one_epoch(
     weight_gate = float(ls.get("weight_gate", 0.0))
     distance_align = ls.get("D_align", "scale")
     lambda_scale = float(ls.get("scale_anchor", 0.05))
-    
+    phaseA_disable_P = bool(ls.get("phaseA_disable_P", False))
+    alpha_target = float(ls.get("alpha_target", 1.0))
+    alpha_reg = float(ls.get("alpha_reg", 0.0))
+    beta_reg = float(ls.get("beta_reg", 0.0))
+    huber_delta_phaseA = float(ls.get("huber_delta", 0.05))
+    huber_delta_phaseB = float(ls.get("phaseB_huber_delta", huber_delta_phaseA))
+    enforce_scale_clamp = bool(ls.get("enforce_scale_clamp", False))
+    phaseB_r2_threshold = float(ls.get("r2_phaseB_threshold", 0.0))
+
     # 自适应配重相关（把 EMA 状态挂在 model 上，跨 epoch 复用）
     adaptive_P        = bool(ls.get("adaptive_P", True))
     adaptive_P_ema    = float(ls.get("adaptive_P_ema", 0.9))
@@ -521,9 +574,16 @@ def train_one_epoch(
         sigma = M.std().clamp_min(1e-6)
         return (M - mu) / sigma
         
+    sch = cfg.get("schedule", {}) or {}
+    phaseA_steps = int(sch.get("phaseA_steps", 0))
+    phaseB_ramp = int(sch.get("phaseB_ramp_steps", 0))
+
+    if not hasattr(model, "_phaseB_enabled"):
+        model._phaseB_enabled = not phaseA_disable_P
+
     # Calculate max_step like in research codebase
     max_step = len(train_dataset) // batch_size if batch_size > 0 else 1
-    
+
     # Initialize metrics for this epoch
     epoch_metrics = {
         "losses": [],
@@ -542,6 +602,7 @@ def train_one_epoch(
     # Multiple training steps per epoch (the unconventional part!)
     for step_count in range(max_step):
         global_step = epoch * max_step + step_count + 1
+        in_phaseA = global_step <= phaseA_steps
 
         # ---- Warmup LR（线性）----
         if warmup_steps > 0:
@@ -551,29 +612,70 @@ def train_one_epoch(
                 g["lr"] = new_lr        
         
         optimizer.zero_grad()
-        # === Two-View：对同一批输入独立采两份 site 子集 ===
-        x_full = node_batches[0]  # 与原版一致：每步都用同一个 tree batch
-        x_a = _subsample_sites(x_full, keep_ratio)
-        x_b = _subsample_sites(x_full, keep_ratio)
-        
-        # 两次前向
-        z_a = model(x_a)   # [1, N, D]
-        z_b = model(x_b)   # [1, N, D]
+        # === Multi-view (optional) ===
+        mv_on = bool(tr.get("multiview", False))
+        x_full = node_batches[0]  # single-tree batch
+        z_full = model(x_full)    # [1, N, D]
+        z_centered_full = z_full - z_full.mean(dim=1, keepdim=True)
+        z_centered_sq = z_centered_full.squeeze(0)
+        dm_full = pairwise_distances(z_full, metric=dist_metric).to(device)
 
-        # 两个视角的距离矩阵 + 均值融合
-        dm_a = _pairwise_dm(z_a)  # [1, N, N]
-        dm_b = _pairwise_dm(z_b)  # [1, N, N]
-        z_full = model(x_full)
-        dm_full = pairwise_distances(z_full, metric=dist_metric).to(device)       
-        dm_est  = (dm_full + dm_a + dm_b) / 3.0
-        # 1) D-loss：估计距离 vs 参考树距离
-        batch_D = distance_error_from_dm(
-            dm_est=dm_est,
-            dm_ref=ref_dm_batches[0],   # 注意这里是 ref_dm，不是原始输入特征
-            diff_norm=1,
-            alpha=distance_alpha,
-            align=distance_align,
-        )        
+        scale_clamp_value = None
+        if enforce_scale_clamp:
+            v_est_full = _triu_vector(dm_full)
+            v_ref_full = _triu_vector(ref_dm_batches[0])
+            scale_num = (v_est_full * v_ref_full).sum()
+            scale_den = (v_est_full * v_est_full).sum().clamp_min(1e-8)
+            scale_factor = (scale_num / scale_den).clamp_min(1e-8).detach()
+            scale_factor = torch.clamp(scale_factor, min=1e-4, max=1e4)
+            scale_clamp_value = float(scale_factor.item())
+            z_full = z_full * scale_factor
+            z_centered_full = z_full - z_full.mean(dim=1, keepdim=True)
+            z_centered_sq = z_centered_full.squeeze(0)
+            dm_full = pairwise_distances(z_full, metric=dist_metric).to(device)
+
+        if mv_on:
+            x_a = _subsample_sites(x_full, keep_ratio)
+            x_b = _subsample_sites(x_full, keep_ratio)
+            z_a = model(x_a)
+            z_b = model(x_b)
+            dm_a = _pairwise_dm(z_a)
+            dm_b = _pairwise_dm(z_b)
+            if enforce_scale_clamp:
+                z_a = z_a * scale_factor
+                z_b = z_b * scale_factor
+                dm_a = pairwise_distances(z_a, metric=dist_metric).to(device)
+                dm_b = pairwise_distances(z_b, metric=dist_metric).to(device)
+            dm_est = (dm_full + dm_a + dm_b) / 3.0
+        else:
+            dm_est = dm_full
+
+        # 1) D-loss (l2sq regression to tree distance)
+        ps_cfg = tr.get("pair_sampling", {}) or {}
+        huber_delta_use = huber_delta_phaseA if in_phaseA else huber_delta_phaseB
+        dres = pairwise_l2sq_regression(
+            E=z_centered_full,
+            d_true=ref_dm_batches[0],
+            align=distance_align if distance_align in ("affine", "scale", "none") else "affine",
+            huber_delta=huber_delta_use,
+            bins=int(ps_cfg.get("bins", 10)),
+            sampling_mode=("bucket_equal" if (ps_cfg.get("mode", "bucket_equal") == "bucket_equal") else "none"),
+            long_pair_boost=float(ps_cfg.get("long_pair_boost", 1.5)),
+            center=True,
+            ensure_positive_alpha=True,
+        )
+        batch_D = dres["loss"]
+        alpha_tensor = dres.get("alpha_raw")
+        beta_tensor = dres.get("beta_raw")
+        if alpha_reg > 0.0 and alpha_tensor is not None:
+            batch_D = batch_D + alpha_reg * (alpha_tensor - alpha_target).pow(2).mean()
+        if beta_reg > 0.0 and beta_tensor is not None:
+            batch_D = batch_D + beta_reg * (beta_tensor).pow(2).mean()
+        alpha_logged = dres["alpha"].mean()
+        beta_logged = dres["beta"].mean()
+        alpha_D = float(alpha_logged.item())
+        beta_D = float(beta_logged.item())
+        r2_l2sq = float(dres["r2"].item())
         # 2) P-loss：在 dm_est 上采样四元组并计算 additivity / triplet / quadruplet        
         dm_quartets, dm_ref_quartets = generate_quartets_tensor(
             batch_size=batch_size,  # Number of quartets to sample
@@ -600,6 +702,20 @@ def train_one_epoch(
                 # matching_mode = "all" if global_step < max(1000, 0.5*max_step) else "mismatched",
                 device=device,
             )
+            # compute quartet active ratio for adaptive cap logic
+            with torch.no_grad():
+                from loss_minimal import compute_pairwise_distance_sums
+                ds_ref = compute_pairwise_distance_sums(dm_ref_quartets)
+                ds_est = compute_pairwise_distance_sums(dm_quartets)
+                _, top2_ref = torch.topk(ds_ref, 2, dim=1)
+                top2_vals = ds_est.gather(1, top2_ref)
+                S1, S2 = top2_vals[:, 0], top2_vals[:, 1]
+                lowest_idx = 3 - top2_ref.sum(dim=1)
+                S3 = ds_est[torch.arange(ds_est.size(0), device=ds_est.device), lowest_idx]
+                den = (S1 + S2).clamp_min(1e-8)
+                gap_ratio = (S1 + S2 - 2.0 * S3) / den
+                active_rate_cur = (push_margin_eff - gap_ratio > 0).float().mean().item()
+        
         
         elif metric_loss_type == "triplet":
             batch_P = triplet_loss_quartet_tensor_vectorized(
@@ -610,6 +726,7 @@ def train_one_epoch(
             )
             batch_P_close = torch.tensor(0.0, device=device)
             batch_P_push = torch.tensor(0.0, device=device)
+            active_rate_cur = float("nan")
 
         elif metric_loss_type == "quadruplet":
             batch_P, _, _, _, _ = quadruplet_loss_quartet_tensor_vectorized(
@@ -621,11 +738,12 @@ def train_one_epoch(
             )
             batch_P_close = torch.tensor(0.0, device=device)
             batch_P_push = torch.tensor(0.0, device=device)
+            active_rate_cur = float("nan")
         else:
             raise ValueError(f"Invalid metric loss: {metric_loss_type}")
         
         # 3) Two-View 一致性损失：距离矩阵在换列子集时应稳定
-        if lambda_cons > 0.0:
+        if lambda_cons > 0.0 and mv_on:
             # L_cons = torch.nn.functional.mse_loss(_zscore(dm_a), _zscore(dm_b))
             va = _triu_vector(dm_a)  # (N*(N-1)/2,)
             vb = _triu_vector(dm_b)
@@ -643,33 +761,145 @@ def train_one_epoch(
                 lambda_penalty=weight_gate,
             )
 
-        # ---- 自适应配重：把 P 的有效权重自动调到和 D 同量级 ----
+        # ---- 自适应配重 + Phase A/B 调度 ----
+        # baseline consistency weight ramp
+        cons_w0 = float(ls.get("consistency_weight", 0.0))
+        cons_wT = float(ls.get("consistency_weight_target", cons_w0))
+        if not in_phaseA and phaseB_ramp > 0:
+            ramp = min(1.0, (global_step - phaseA_steps) / float(max(1, phaseB_ramp)))
+            lambda_cons = cons_w0 + (cons_wT - cons_w0) * ramp
+        else:
+            lambda_cons = cons_w0 if in_phaseA else cons_wT
+
+        # Adaptive P logic
         if adaptive_P:
             st = model._adaptive_p_state
             with torch.no_grad():
                 st["ema_D"] = st["momentum"] * st["ema_D"] + (1.0 - st["momentum"]) * (batch_D.detach().abs() + 1e-8)
                 st["ema_P"] = st["momentum"] * st["ema_P"] + (1.0 - st["momentum"]) * (batch_P.detach().abs() + 1e-8)
-                # weight_P_eff = st["wP_base"] * (st["target_ratio"] * st["ema_D"] / st["ema_P"]).clamp(0.1, 3.0)
                 raw_scale = st["target_ratio"] * (st["ema_D"] / (st["ema_P"] + 1e-8))
-                # 收紧上限，防止 P 盖过 D；建议先 1.2，也可以先做 1.0 做对照
-                weight_P_eff = st["wP_base"] * raw_scale.clamp(0.3, 0.6)                
-                warmup_P = int(tr.get("p_warmup_steps", 500))
-                if warmup_P > 0:
-                    scale = min(1.0, global_step / warmup_P)
-                    weight_P_eff = weight_P_eff * scale                
+                cap_max = float(ls.get("adaptive_P_cap_max", 1.0))
+                cap_by_act = bool(ls.get("cap_by_act", False))
+                cap_floor = float(ls.get("cap_by_act_floor", 0.6))
+                cap_dyn = cap_max
+                if cap_by_act and isinstance(active_rate_cur, float) and not (active_rate_cur != active_rate_cur):
+                    if active_rate_cur < 0.3:
+                        cap_dyn = cap_max
+                    elif active_rate_cur < 0.6:
+                        cap_dyn = max(cap_floor, 0.8 * cap_max)
+                    else:
+                        cap_dyn = max(cap_floor, 0.7 * cap_max)
+                weight_P_eff = st["wP_base"] * raw_scale.clamp(0.0, cap_dyn)
         else:
             weight_P_eff = torch.as_tensor(weight_P_base, device=device)
 
+        phaseB_enabled = getattr(model, "_phaseB_enabled", not phaseA_disable_P)
+        if phaseA_disable_P and (not phaseB_enabled) and (global_step > phaseA_steps):
+            if phaseB_r2_threshold <= 0.0 or r2_l2sq >= phaseB_r2_threshold:
+                phaseB_enabled = True
+                model._phaseB_enabled = True
+        elif not phaseA_disable_P and (not phaseB_enabled) and (global_step > phaseA_steps):
+            phaseB_enabled = True
+            model._phaseB_enabled = True
+
+        if not phaseB_enabled:
+            weight_P_eff = torch.zeros_like(weight_P_eff)
+        else:
+            if phaseB_ramp > 0:
+                ramp = min(1.0, max(0.0, (global_step - phaseA_steps) / float(max(1, phaseB_ramp))))
+                weight_P_eff = weight_P_eff * ramp
+
+        # MDS anchor (Phase-aware pull towards classical MDS solution)
+        mds_target = getattr(model, "_mds_target", None)
+        mds_anchor_weight = float(getattr(model, "_mds_anchor_weight", 0.0))
+        mds_anchor_decay = int(getattr(model, "_mds_anchor_decay", phaseB_ramp))
+        mds_anchor_mode = getattr(model, "_mds_anchor_mode", "embedding")
+        mds_anchor_weight_eff = 0.0
+        L_mds = torch.tensor(0.0, device=device)
+        if mds_target is not None and mds_anchor_weight > 0.0:
+            if in_phaseA:
+                anchor_scale = 1.0
+            elif mds_anchor_decay and mds_anchor_decay > 0:
+                progress = min(1.0, (global_step - phaseA_steps) / float(mds_anchor_decay))
+                anchor_scale = max(0.0, 1.0 - progress)
+            else:
+                anchor_scale = 0.0
+            if anchor_scale > 0.0:
+                if mds_anchor_mode == "pairwise":
+                    target_dm = getattr(model, "_mds_target_dm", None)
+                    if target_dm is not None:
+                        target_dm = target_dm.to(z_full.device, dtype=z_full.dtype)
+                        dm_centered_sq = pairwise_distances(z_centered_full, metric=dist_metric).squeeze(0).pow(2)
+                        L_mds = torch.mean((dm_centered_sq - target_dm) ** 2)
+                        mds_anchor_weight_eff = mds_anchor_weight * anchor_scale
+                else:
+                    anchor_tgt = mds_target.to(z_full.device, dtype=z_full.dtype)
+                    if anchor_tgt.shape[0] == z_centered_sq.shape[0]:
+                        L_mds = torch.mean((z_centered_sq - anchor_tgt) ** 2)
+                        mds_anchor_weight_eff = mds_anchor_weight * anchor_scale
+                    else:
+                        logging.warning(
+                            f"MDS anchor size mismatch (target={anchor_tgt.shape[0]}, embedding={z_centered_sq.shape[0]})."
+                        )
+
         # NEW: Scale anchor（不要放在 no_grad 里）
         if lambda_scale > 0.0:
-            v_est = _triu_vector(dm_est)               # 上三角展开（与 diag 中一致）
-            v_ref = _triu_vector(ref_dm_batches[0])    # 参考距离（不参与梯度）
-            s_num = (v_est * v_ref).sum()
-            s_den = (v_est * v_est).sum().clamp_min(1e-8)
-            scale_s = s_num / s_den                    # 与 D_align='scale' 同源的最优缩放
-            scale_penalty = (scale_s - 1.0).pow(2)     # 约束尺度靠近 1
+            # v_est = _triu_vector(dm_est)               # 上三角展开（与 diag 中一致）
+            # v_ref = _triu_vector(ref_dm_batches[0])    # 参考距离（不参与梯度）
+            # s_num = (v_est * v_ref).sum()
+            # s_den = (v_est * v_est).sum().clamp_min(1e-8)
+            # scale_s = s_num / s_den                    # 与 D_align='scale' 同源的最优缩放
+            # scale_penalty = (scale_s - 1.0).pow(2)     # 约束尺度靠近 1
+            q_est = _triu_vector(dm_est.pow(2))     # q_est = d_est^2
+            d_ref = _triu_vector(ref_dm_batches[0]) # 仍然是 d_T
+            t_num = (q_est * d_ref).sum()
+            t_den = (q_est * q_est).sum().clamp_min(1e-8)
+            t = t_num / t_den                        # 在 q_est→d_T 的最小二乘斜率
+            scale_penalty = (t - 1.0).pow(2)            
         else:
             scale_penalty = torch.tensor(0.0, device=device)
+
+        # === 统一计算“距离域”的 scale_ref（s），用于 sentry 与诊断 ===
+        with torch.no_grad():
+            v_est_cur = _triu_vector(dm_est)
+            v_ref_cur = _triu_vector(ref_dm_batches[0])
+            s_num_cur = (v_est_cur * v_ref_cur).sum()
+            s_den_cur = (v_est_cur * v_est_cur).sum().clamp_min(1e-8)
+            scale_ref_s = (s_num_cur / s_den_cur).item()  # float
+            
+        # Scale Sentry adjustments
+        ss_cfg = cfg.get("scale_safety", {}) or {}
+        if bool(ss_cfg.get("sentry_enabled", True)):
+            if not hasattr(model, "_scale_sentry"):
+                model._scale_sentry = ScaleSentry(
+                    ScaleSentryConfig(
+                        threshold=float(ss_cfg.get("threshold", 0.25)),
+                        window_steps=int(ss_cfg.get("window_steps", 50)),
+                        grad_clip_during_sentry=float(ss_cfg.get("grad_clip_during_sentry", 0.5)),
+                        p_weight_drop_on_sentry=float(ss_cfg.get("p_weight_drop_on_sentry", 0.2)),
+                    )
+                )
+                model._sentry_hits = 0
+                
+            # 使用统一计算的 s（距离域 scale_ref）
+            adj = model._scale_sentry.update(global_step, alpha=alpha_D, scale_ref=scale_ref_s)
+            if adj.get("active", 0.0) > 0:
+                model._sentry_hits = getattr(model, "_sentry_hits", 0) + 1
+                max_grad_norm = float(adj.get("grad_clip", max_grad_norm))
+                weight_P_eff = weight_P_eff * float(adj.get("p_weight_scale", 1.0))
+                if adj.get("just_triggered", 0.0) > 0:   # 只在进入时打一次
+                    logging.warning(
+                        f"[sentry] step={global_step} | alpha={alpha_D:.4f} | "
+                        f"scale_ref_s={scale_ref_s:.4f} | dev_a={adj.get('dev_alpha'):0.3f} "
+                        f"| dev_s={adj.get('dev_scale'):0.3f} | grad_clip->{max_grad_norm:.3f} "
+                        f"| wP_eff x {float(adj.get('p_weight_scale', 1.0)):.3f}"
+                    )           
+            # scale_val = float(scale_s) if 'scale_s' in locals() else None
+            # adj = model._scale_sentry.update(global_step, alpha=alpha_D, scale_ref=scale_val)
+            # if adj.get("active", 0.0) > 0:
+            #     model._sentry_hits = getattr(model, "_sentry_hits", 0) + 1
+            #     max_grad_norm = float(adj.get("grad_clip", max_grad_norm))
+            #     weight_P_eff = weight_P_eff * float(adj.get("p_weight_scale", 1.0))
 
         # Total loss（加入尺度锚）
         total_loss = (
@@ -678,6 +908,7 @@ def train_one_epoch(
             + lambda_cons * L_cons
             + gate_loss
             + lambda_scale * scale_penalty            # NEW
+            + mds_anchor_weight_eff * L_mds
         )
 
         # Total loss
@@ -724,17 +955,39 @@ def train_one_epoch(
                 s_num = (v_est * v_ref).sum()
                 s_den = (v_est * v_est).sum().clamp_min(1e-8)
                 scale_s = (s_num / s_den).item()
-            
+
+                # 诊断：平方域斜率 t（若可用）与 1/alpha 的对比
+                if 't' in locals() and isinstance(t, torch.Tensor):
+                    t_val = float(t.detach())
+                else:
+                    t_val = float('nan')
+                t_from_alpha = (1.0 / max(alpha_D, 1e-8))  # 当 beta≈0 时，理论上 t ≈ 1/alpha            
+                
                 lr_now = optimizer.param_groups[0]["lr"]
+                cap_max_log = float(ls.get("adaptive_P_cap_max", 1.0))
+                # logging.info(
+                #     f"[diag] gstep={global_step} | lr={lr_now:.2e} | "
+                #     f"wP_eff={float(weight_P_eff):.3f} (base={weight_P_base:.3f}, cap_max={cap_max_log:.2f}) | "
+                #     f"D={batch_D.item():.3f} | P={batch_P.item():.3f} | cons={L_cons.item():.3f} | "
+                #     f"P_close={batch_P_close.item():.3f} | P_push={batch_P_push.item():.3f} | "
+                #     f"mm={mismatch_rate:.3f} | act={active_rate:.3f} | gap={gap_mean:.4f} | "
+                #     f"margin={push_margin_eff:.3f} | scale_ref={scale_s:.4f} | "
+                #     f"alpha={alpha_D:.4f} | beta={beta_D:.4f} | R2_l2sq={r2_l2sq:.4f} | "
+                #     f"mds_w={mds_anchor_weight_eff:.3f} | L_mds={L_mds.item():.4f} | "
+                #     f"sanch={float(scale_penalty):.4e}"
+                # )
                 logging.info(
                     f"[diag] gstep={global_step} | lr={lr_now:.2e} | "
-                    f"wP_eff={float(weight_P_eff):.3f} (base={weight_P_base:.3f}, raw×base={float(model._adaptive_p_state['wP_base']*raw_scale):.3f}) | "
+                    f"wP_eff={float(weight_P_eff):.3f} (base={weight_P_base:.3f}, cap_max={cap_max_log:.2f}) | "
                     f"D={batch_D.item():.3f} | P={batch_P.item():.3f} | cons={L_cons.item():.3f} | "
                     f"P_close={batch_P_close.item():.3f} | P_push={batch_P_push.item():.3f} | "
                     f"mm={mismatch_rate:.3f} | act={active_rate:.3f} | gap={gap_mean:.4f} | "
-                    f"margin={push_margin_eff:.3f} | scale_ref={scale_s:.4f} | "
-                    f"sanch={float(scale_penalty):.4e}" 
-                )
+                    f"margin={push_margin_eff:.3f} | "
+                    f"scale_ref_s={scale_s:.4f} | t_sq={t_val:.4f} | 1/alpha={t_from_alpha:.4f} | "
+                    f"alpha={alpha_D:.4f} | beta={beta_D:.4f} | R2_l2sq={r2_l2sq:.4f} | "
+                    f"mds_w={mds_anchor_weight_eff:.3f} | L_mds={L_mds.item():.4f} | "
+                    f"sanch={float(scale_penalty):.4e}"
+                )                
                     
         # Store step metrics
         epoch_metrics["losses"].append(total_loss.item())
@@ -929,6 +1182,42 @@ def main(cli_args=None):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info(f"Total parameters: {total_params}")
     logging.info(f"Trainable parameters: {trainable_params}")
+
+    # Optional MDS warm-start / anchor
+    init_mode = (cfg.get("model", {}).get("init_mode") or "random").lower()
+    if init_mode in {"mds_l2sq", "mds_l2"}:
+        logging.info(f"Running classical MDS initialisation (mode={init_mode})...")
+        dm_batches_for_init = train_dataset.get_ref_distance_matrices(device=device, add_batch_dim=True)
+        if len(dm_batches_for_init) == 0:
+            logging.warning("No reference distance matrices found for MDS init; skipping.")
+        else:
+            dm_ref = dm_batches_for_init[0].squeeze(0).detach().cpu()
+            treat_as_squared = init_mode == "mds_l2sq"
+            try:
+                target_dim = int(cfg["model"]["output_dim"])
+                mds_embedding, _ = classical_mds(dm_ref, out_dim=target_dim, treat_as_squared=treat_as_squared)
+                if mds_embedding.shape[1] < target_dim:
+                    pad = target_dim - mds_embedding.shape[1]
+                    pad_tensor = torch.zeros(mds_embedding.shape[0], pad, dtype=mds_embedding.dtype)
+                    mds_embedding = torch.cat([mds_embedding, pad_tensor], dim=1)
+                elif mds_embedding.shape[1] > target_dim:
+                    mds_embedding = mds_embedding[:, :target_dim]
+                mds_embedding = mds_embedding - mds_embedding.mean(dim=0, keepdim=True)
+                loss_cfg = cfg.get("loss", {}) or {}
+                anchor_mode = (loss_cfg.get("mds_anchor_mode", "embedding") or "embedding").lower()
+                model._mds_anchor_mode = anchor_mode
+                mds_embed_device = mds_embedding.to(device)
+                model.register_buffer("_mds_target", mds_embed_device)
+                if anchor_mode == "pairwise":
+                    dm_target = pairwise_distances(mds_embed_device.unsqueeze(0), metric=loss_cfg.get("metric", "euclidean")).squeeze(0).pow(2)
+                    model.register_buffer("_mds_target_dm", dm_target)
+                else:
+                    model.register_buffer("_mds_target_dm", torch.zeros(1, device=device))
+                model._mds_anchor_weight = float(loss_cfg.get("mds_anchor_weight", 0.0))
+                model._mds_anchor_decay = int(loss_cfg.get("mds_anchor_decay_steps", cfg.get("schedule", {}).get("phaseB_ramp_steps", 0)))
+                logging.info("MDS embedding cached for Phase-A anchoring.")
+            except Exception as exc:
+                logging.warning(f"MDS init failed ({exc}); continuing with random init.")
 
     # Setup optimizer
     optimizer = optim.AdamW(

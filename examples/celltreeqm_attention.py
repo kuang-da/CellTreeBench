@@ -395,6 +395,12 @@ class CellTreeQMAttention(nn.Module):
             encoder_layer, num_layers=num_layers
         )
 
+        # Pre-LN before output (optional)
+        if norm_method == "pre_ln":
+            self.pre_ln = nn.LayerNorm(proj_dim)
+        else:
+            self.pre_ln = None
+
         # Output layer
         self.output_layer = nn.Linear(proj_dim, output_dim)
 
@@ -442,6 +448,9 @@ class CellTreeQMAttention(nn.Module):
         x = self.transformer_encoder(x)
         x = x.squeeze(1)
 
+        # Pre-LN before output
+        if self.pre_ln is not None:
+            x = self.pre_ln(x)
         # Output layer
         x = self.output_layer(x)
 

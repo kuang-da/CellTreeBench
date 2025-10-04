@@ -1,0 +1,98 @@
+exp_id: exp-3
+seed: 123
+
+data:
+  dataset_name: celltreeqm_dataset/lg_bd_ntips100_len5000
+  lineage_name: celltreeqm-lg-bd
+  dataset_names:
+    train: 0.5
+    test: 0.5
+  autosplit: sites
+
+training:
+  batch_size: 4096
+  lr: 0.0003
+  weight_decay: 5.0e-5
+  num_epochs: 20
+  eval_interval: 300
+  warmup_steps: 500
+  grad_clip: 1.0
+  p_warmup_steps: 2000
+  multiview: false
+
+  pair_sampling:
+    mode: bucket_equal
+    bins: 10
+    long_pair_boost: 1.5
+
+evaluation:
+  multiview: false
+  views: 4
+  keep_ratio: 0.5
+
+loss:
+  # Metrics and losses
+  metric: euclidean
+  metric_loss: additivity
+  d_loss: l2sq_huber
+  huber_delta: 0.5
+  phaseB_huber_delta: 0.05
+
+  # D: squared Euclidean alignment to tree distance
+  weight_D: 1.0
+  distance_error_alpha: 0.75
+  D_align: affine
+  scale_anchor: 0.05
+  mds_anchor_weight: 0.8
+  mds_anchor_decay_steps: 4000
+  alpha_target: 1.0
+  alpha_reg: 0.05
+  beta_reg: 0.01
+  phaseA_disable_P: true
+
+  # P: quartet consistency (enabled after Phase A with ramp)
+  weight_P: 6.0
+  weight_close: 1.0
+  weight_push: 5.0
+  push_margin: 0.1
+  adaptive_P: true
+  adaptive_P_ema: 0.95
+  adaptive_P_target_ratio: 0.4
+  adaptive_P_cap_max: 1.0
+  cap_by_act: true
+  cap_by_act_floor: 0.6
+
+  # Two-view consistency (only if training.multiview=true)
+  consistency_weight: 0.3
+  consistency_weight_target: 1.2
+
+  # Feature gate penalty (kept off by default)
+  weight_gate: -1.0
+
+schedule:
+  phaseA_steps: 2000      # D-only warm start
+  phaseB_ramp_steps: 2000 # ramp P and consistency
+
+model:
+  cell_encoder_type: site_setpool # linear, site_token, site_setpool
+
+  # CellTreeQM ----------------------
+  proj_dim: 512
+  output_dim: 256
+  hidden_dim: 512
+  num_heads: 4
+  num_layers: 2
+  dropout_data: 0.0
+  dropout_metric: 0.05
+  norm_method: pre_ln  # pre-layernorm before output head
+  gate_type: none
+  init_mode: mds_l2sq
+
+  # CellEncoder ----------------------
+  site_alphabet_size: 22
+  site_embed_dim: 32
+  site_encoder_heads: 4
+  site_encoder_layers: 1
+  site_dropout: 0.1
+  site_pma_seeds: 8
+  site_chunk_size: 1

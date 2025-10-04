@@ -30,7 +30,13 @@ BATCH_SIZE=${BATCH_SIZE:-2}
 # Define experiments as "<exp_id> <device> [extra args...]"
 experiments=(
   # "exp-1 cuda:0"
-  "exp-2 cuda:1"
+#   "exp-2 cuda:1"
+#   "exp-3 cuda:1"
+#   "exp-4 cuda:1"
+#   "exp-5 cuda:0"
+#   "exp-6 cuda:1"
+#   "exp-7 cuda:0"
+  "exp-9 cuda:1"
 )
 
 # Batch execution logic

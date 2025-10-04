@@ -1,0 +1,87 @@
+exp_id: exp-5
+seed: 123
+
+data:
+  dataset_name: celltreeqm_dataset/lg_bd_ntips100_len5000
+  lineage_name: celltreeqm-lg-bd
+  dataset_names:
+    train: 0.5
+    test: 0.5
+  autosplit: sites
+
+training:
+  batch_size: 4096
+  lr: 0.0003
+  weight_decay: 5.0e-5
+  num_epochs: 20
+  eval_interval: 300
+  warmup_steps: 500
+  grad_clip: 1.0
+  p_warmup_steps: 2000
+  multiview: false
+
+  pair_sampling:
+    mode: bucket_equal
+    bins: 10
+    long_pair_boost: 1.5
+
+evaluation:
+  multiview: false
+  views: 4
+  keep_ratio: 0.5
+
+loss:
+  metric: euclidean
+  metric_loss: additivity
+  d_loss: l2sq_huber
+  huber_delta: 0.0
+  phaseB_huber_delta: 0.0
+
+  weight_D: 1.0
+  distance_error_alpha: 0.75
+  D_align: affine
+  scale_anchor: 0.30
+  mds_anchor_weight: 2.0
+  mds_anchor_decay_steps: 4000
+  mds_anchor_mode: pairwise
+  alpha_target: 1.0
+  alpha_reg: 1.0
+  beta_reg: 0.2
+  phaseA_disable_P: true
+  r2_phaseB_threshold: 0.95
+
+  weight_P: 0.0
+  weight_close: 1.0
+  weight_push: 5.0
+  push_margin: 0.1
+  adaptive_P: false
+  cap_by_act: false
+
+  consistency_weight: 0.0
+  consistency_weight_target: 0.0
+  weight_gate: -1.0
+
+schedule:
+  phaseA_steps: 4000
+  phaseB_ramp_steps: 2000
+
+model:
+  cell_encoder_type: site_setpool
+  proj_dim: 512
+  output_dim: 256
+  hidden_dim: 512
+  num_heads: 4
+  num_layers: 2
+  dropout_data: 0.0
+  dropout_metric: 0.05
+  norm_method: pre_ln
+  gate_type: none
+  init_mode: mds_l2sq
+
+  site_alphabet_size: 22
+  site_embed_dim: 32
+  site_encoder_heads: 4
+  site_encoder_layers: 1
+  site_dropout: 0.1
+  site_pma_seeds: 8
+  site_chunk_size: 1
